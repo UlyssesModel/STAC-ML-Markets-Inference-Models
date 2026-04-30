@@ -94,3 +94,28 @@ This repo ships **artifacts only** (model weights + ONNX exports). To run the RS
 To **extend** the benchmark — train new models, swap in a Ulysses replacement, etc. — you also need the **training code** and the **labeled market data** the original LSTM/GBT models were trained on. Neither is in this repo.
 
 A local latency baseline (`bench_results.json`, produced by `scripts/benchmark_io.py`) was measured on a `stac-claude-dev` `e2-standard-4` GCP VM (4 vCPU, no GPU, no AMX). These numbers are **not comparable** to RS-40 production hardware budgets; treat them as a relative baseline among the models in this repo, not as an absolute claim.
+
+## Latency baseline (e2-standard-4 CPU)
+
+All numbers from `bench_results.json`. Hardware: GCP `e2-standard-4` (4 vCPU, no GPU, no AMX). Treat as a relative baseline among the models in this repo, not an absolute target — the RS-40 production-hardware budget (lens 2: p99 10 µs) is roughly two orders of magnitude tighter than what this CPU achieves on the trained LSTM models.
+
+| Model | Runtime | p50 (µs) | p99 (µs) |
+| --- | --- | ---: | ---: |
+| `LSTM_A.onnx` | onnxruntime | 570 | 890 |
+| `LSTM_A.keras64` | tf.saved_model | 13470 | 17613 |
+| `LSTM_B.onnx` | onnxruntime | 4294 | 5497 |
+| `LSTM_B.keras64` | tf.saved_model | 67684 | 77689 |
+| `LSTM_C.onnx` | onnxruntime | 193470 | 244644 |
+| `LSTM_C.keras64` | tf.saved_model | 1218123 | 1373956 |
+| `LSTM_Null_A.onnx` | onnxruntime | 17 | 37 |
+| `LSTM_Null_A.keras64` | tf.saved_model | 394 | 608 |
+| `LSTM_Null_B.onnx` | onnxruntime | 73 | 153 |
+| `LSTM_Null_B.keras64` | tf.saved_model | 414 | 554 |
+| `LSTM_Null_C.onnx` | onnxruntime | 151 | 227 |
+| `LSTM_Null_C.keras64` | tf.saved_model | 491 | 681 |
+| `GBT_A.onnx` | onnxruntime | 26 | 109 |
+| `GBT_B.onnx` | onnxruntime | 77 | 228 |
+| `GBT_C.onnx` | onnxruntime | 582 | 689 |
+| `GBT_Null_A.onnx` | onnxruntime | 9 | 31 |
+| `GBT_Null_B.onnx` | onnxruntime | 8 | 20 |
+| `GBT_Null_C.onnx` | onnxruntime | 10 | 33 |
