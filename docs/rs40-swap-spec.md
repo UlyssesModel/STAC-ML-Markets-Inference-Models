@@ -289,6 +289,51 @@ Numbers it produces are useful for relative comparison between
 predictors on the same rig and are not directly comparable to a
 STAC-audited result.
 
+### §5.7 Timing methodology refinement (informative)
+
+The Sumaco driver's timed window has been tightened to bring the
+measurement closer to the discipline STAC's reference applies, without
+copying any STAC code. Specifically: input tensors for the timed loop
+are now pre-generated as a single `(n_timed, batch, T, F) float32`
+array drawn from the seeded RNG before timing starts; latency samples
+are written into a pre-allocated `np.empty(n_timed, dtype=np.int64)`
+buffer via index-assignment; the timed block is restricted to
+`t0 = perf_counter_ns(); predict(x); t1 = perf_counter_ns()` and one
+index-assign — no RNG draws, no list growth, no per-iteration
+allocation. Optional CPU pinning is now exposed via `--pin-cpu N`
+(Linux-only via `os.sched_setaffinity`; on other platforms the flag
+warns and continues without pinning).
+
+Before/after on the same `e2-standard-4` rig, batch 1, no CPU pinning
+(before from §5.4 above, 1000 timed; after with the tight window, 100
+warmup + 1000 timed):
+
+| Config | Before p50 / p99 | After p50 / p99 |
+| --- | ---: | ---: |
+| `LSTM_A.onnx` | 593 / 843 µs | 611 / 947 µs |
+| `ulysses_stub identity` (Stage 1+3 floor) | 96 / 233 µs | 173 / 339 µs |
+| `ulysses_stub linear_stub` | 5079 / 9165 µs | 3336 / 8389 µs |
+
+The qualitative picture is preserved — `LSTM_A.onnx` sits in the
+high-hundreds-of-µs range, the identity floor is well under it, and
+`linear_stub` is firmly in the multi-millisecond range — but the
+individual deltas are within the run-to-run variance band of a shared
+4-vCPU cloud VM and should not be read as causal effects of the
+methodology change alone. The point of the change is the methodology
+itself, not these specific numbers; relative comparisons taken under
+the new methodology will be cleaner going forward.
+
+Remaining gaps versus STAC's reference, called out explicitly: we still
+do not implement separate Tsupply / Tresult timestamps (we capture a
+single perf_counter_ns pair around the predict call rather than
+splitting the boundary between data supply and result return); we do
+not run NMI parallelism (multiple model instances inferring
+concurrently); we do not implement out-of-order result handling for
+parallel mode; we discard the `(B, 1)` predictions rather than
+storing them in a pre-allocated output buffer; and we do not invoke
+realtime scheduling. Closing any of those is a separate step beyond
+this refinement.
+
 ## §6 Cross-cutting open questions
 
 Stage-specific open questions are inline in §5; this section lists

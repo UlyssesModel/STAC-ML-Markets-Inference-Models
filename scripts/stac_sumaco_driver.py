@@ -12,9 +12,31 @@ The driver is deliberately separated from the model behind a `STACPredictor`
 ABC so a Ulysses-based replacement can drop in next to the ONNX baseline
 without touching the timing harness.
 
-Note: STAC's own published vendor results use a similar but more sophisticated
-protocol (CPU pinning, exclusive-GPU disciplines, formal warm-up regimes). The
-numbers produced here are *relative*; they are not directly comparable to a
+Timing methodology
+------------------
+The timed window is restricted to exactly the predictor's `predict()` call
+between two `time.perf_counter_ns()` reads. Everything else — RNG draws,
+tensor allocation, latency-buffer growth — is pushed outside the window:
+
+* Input tensors for the entire timed loop are pre-generated as a single
+  `(n_timed, batch, T, F) float32` array, drawn from the seeded RNG
+  before timing starts. Each timed iteration takes a `(batch, T, F)`
+  slice — no `np.random` call inside the timed window.
+
+* Latency samples are stored into a pre-allocated `np.empty(n_timed,
+  dtype=np.int64)` buffer via index-assignment. No Python list growth
+  inside the timed window.
+
+* CPU pinning is optional via `--pin-cpu N`, which calls
+  `os.sched_setaffinity(0, {N})` once before warmup. Linux-only;
+  non-Linux platforms print a warning and continue without pinning.
+
+This brings our driver methodologically closer to audit-grade harnesses
+while remaining a *protocol-shaped approximation* of STAC's reference, per
+docs/rs40-swap-spec.md §5.6. We still do not implement separate
+Tsupply/Tresult timestamps, NMI parallelism, out-of-order result handling,
+pre-allocated output buffers, or hard-realtime scheduling. Numbers
+produced here remain relative; they are not directly comparable to a
 STAC-audited result.
 """
 
@@ -89,8 +111,10 @@ def run_sumaco(
 ) -> dict:
     """Drive `predictor` under the Sumaco protocol and return a result dict.
 
-    Each call (warmup and timed) sees a fresh `(batch, T, F) float32` tensor
-    drawn from the same RNG. Only the `predict` call is timed.
+    Inputs for the timed loop are pre-generated as a single
+    `(n_timed, batch, T, F) float32` array. Latency samples are written into
+    a pre-allocated int64 buffer. The timed window contains only the
+    `predict()` call. See module docstring for the full timing methodology.
     """
     T, F = predictor.input_shape
     rng = np.random.default_rng(seed)
@@ -99,14 +123,17 @@ def run_sumaco(
         x = rng.standard_normal((batch, T, F), dtype=np.float32)
         predictor.predict(x)
 
-    samples_ns: list[int] = []
-    for _ in range(n_timed):
-        x = rng.standard_normal((batch, T, F), dtype=np.float32)
-        t0 = time.perf_counter_ns()
-        predictor.predict(x)
-        samples_ns.append(time.perf_counter_ns() - t0)
+    inputs = rng.standard_normal((n_timed, batch, T, F), dtype=np.float32)
+    latencies_ns = np.empty(n_timed, dtype=np.int64)
 
-    samples_us = sorted(s / 1000.0 for s in samples_ns)
+    for i in range(n_timed):
+        x = inputs[i]
+        t0 = time.perf_counter_ns()
+        _ = predictor.predict(x)
+        t1 = time.perf_counter_ns()
+        latencies_ns[i] = t1 - t0
+
+    samples_us = sorted(latencies_ns.astype(np.float64) / 1000.0)
     return {
         "host": {
             "hostname": socket.gethostname(),
@@ -122,6 +149,31 @@ def run_sumaco(
         "mean_us": statistics.fmean(samples_us),
         "std_us": statistics.pstdev(samples_us),
     }
+
+
+def _apply_cpu_pin(cpu: int) -> bool:
+    """Pin this process to CPU `cpu`. Returns True on success, False otherwise.
+
+    Linux-only. On non-Linux platforms or if the call fails, prints a
+    one-line warning to stderr and returns False — caller is expected to
+    continue without pinning.
+    """
+    if not hasattr(os, "sched_setaffinity"):
+        print(
+            f"warning: --pin-cpu requested but os.sched_setaffinity is "
+            f"unavailable on {sys.platform}; continuing without pinning",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        os.sched_setaffinity(0, {cpu})
+        return True
+    except OSError as e:
+        print(
+            f"warning: --pin-cpu {cpu} failed ({e}); continuing without pinning",
+            file=sys.stderr,
+        )
+        return False
 
 
 PREDICTOR_CHOICES = ("onnx", "ulysses_stub")
@@ -163,7 +215,17 @@ def main() -> int:
         help="Stage-2 mode for ulysses_stub predictor (default: linear_stub)",
     )
     parser.add_argument("--output-json", default=None, help="Optional path to write result JSON")
+    parser.add_argument(
+        "--pin-cpu",
+        type=int,
+        default=None,
+        help="Pin this process to the given CPU id before warmup (Linux only)",
+    )
     args = parser.parse_args()
+
+    pin_cpu_applied = False
+    if args.pin_cpu is not None:
+        pin_cpu_applied = _apply_cpu_pin(args.pin_cpu)
 
     if args.predictor == "onnx":
         if not args.model_path:
@@ -190,6 +252,7 @@ def main() -> int:
     )
     result["model_path"] = str(args.model_path) if args.model_path else None
     result["predictor"] = args.predictor
+    result["pin_cpu"] = args.pin_cpu if pin_cpu_applied else None
     if args.predictor == "ulysses_stub":
         result["kirk_mode"] = args.ulysses_kirk_mode
 
