@@ -232,13 +232,28 @@ def main() -> int:
             parser.error("--model-path is required when --predictor onnx")
         predictor: STACPredictor = ONNXPredictor(args.model_path)
     elif args.predictor == "ulysses_stub":
-        from ulysses_predictor import UlyssesPredictor
+        from ulysses_predictor import (
+            IdentityKirk,
+            LinearStubKirk,
+            UlyssesPredictor,
+        )
+
+        # Translate the CLI mode string into a concrete KirkCore. Future Kirk
+        # implementations can be plugged in by extending the KirkCore ABC and
+        # routing a new mode value here (or, if the mode space gets unwieldy,
+        # via a dedicated --ulysses-kirk-class flag — not added now to keep
+        # the surface minimal).
+        if args.ulysses_kirk_mode == "linear_stub":
+            kirk = LinearStubKirk(k=args.ulysses_k, seed=args.seed)
+        elif args.ulysses_kirk_mode == "identity":
+            kirk = IdentityKirk()
+        else:  # pragma: no cover — argparse choices guards this
+            parser.error(f"unknown kirk mode: {args.ulysses_kirk_mode}")
 
         predictor = UlyssesPredictor(
-            k=args.ulysses_k,
             m=args.ulysses_m,
-            seed=args.seed,
-            kirk_mode=args.ulysses_kirk_mode,
+            kirk=kirk,
+            readout_seed=args.seed,
         )
     else:  # pragma: no cover — argparse choices guards this
         parser.error(f"unknown predictor: {args.predictor}")

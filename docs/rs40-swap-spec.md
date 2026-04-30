@@ -169,6 +169,10 @@ Artman's 2026-04-20 cross-platform affinity study (Kavara internal — see
 remain TBD by Kirk's external API; this is informative context, not a
 redefinition of the contract.
 
+The integration point on the *swap* side is formalized as the `KirkCore`
+ABC in `scripts/ulysses_predictor.py` — see §5.4 for the contract a
+real-Kirk subclass must satisfy.
+
 - **Compute model:** complex N×N BF16 matmul, decomposed into 4 real BF16
   matmuls via `(A+iB)(C+iD) = (AC − BD) + i(AD + BC)`, dispatched through
   PyTorch oneDNN to AMX (Intel) or AVX-512 / NEON elsewhere.
@@ -205,33 +209,29 @@ redefinition of the contract.
     final `Dense(1)`) or a fixed reduction?
   - Upcast point from BF16 back to the contract dtype.
 
-### §5.4 Reference implementation status
+### §5.4 Kirk integration point — `KirkCore` ABC
 
-The four files in this repo that implement the staged contracts are:
-`scripts/stac_sumaco_driver.py` (Sumaco-protocol driver and the
-`STACPredictor` ABC), `scripts/hankel_adapter.py` (Stage 1 Hankel transform),
-`scripts/ulysses_predictor.py` (Stages 1–3 wired together with a placeholder
-Kirk core), and `tests/` (assertion-based tests on each — `test_hankel.py`
-and `test_ulysses_predictor.py`).
+The Stage-2 swap point is formalized as the `KirkCore` ABC in
+`scripts/ulysses_predictor.py`. To plug a real Kirk implementation
+into the full pipeline:
 
-The placeholder Kirk in `ulysses_predictor.py` produces a real-shaped output
-but no real Kirk compute — it is a deterministic random-init linear
-projection sized to the right input/output, so end-to-end shape, dtype, and
-overhead can be measured before Kirk's real contract lands. Once Jarett's
-contract arrives, the Kirk core is the only stage that needs to change; the
-Hankel adapter and readout shapes are already pinned by §4 of this doc.
+1. Implement `KirkCore.transform(hankel_batch) -> projection_batch` —
+   input is the Hankel adapter's output `(B, F, m, n)`; output is
+   whatever the readout consumes (any rank, batch dim preserved).
+2. Implement `KirkCore.output_shape(F, m, n) -> tuple[int, ...]` so
+   the readout can be sized at `UlyssesPredictor` construction time.
+3. Construct `UlyssesPredictor(kirk=YourKirk(...))` to plug it into
+   the full `(B, 50, 100) -> (B, 1)` pipeline.
 
-`ulysses_predictor.py` exposes two reference Stage-2 modes for measurement:
-`linear_stub` (a brute-force `(F·m·n) → K → 1` matmul that bounds a
-worst-case-ish Stage 2) and `identity` (a no-op Stage 2 that collapses the
-pipeline to Hankel + a single `(F·m·n) → 1` linear, giving the floor cost of
-Stages 1 and 3 alone). Sumaco-protocol latency on the local
-`e2-standard-4` rig (50 warmup + 1000 timed, batch 1, Sumaco fixed-unique
-window): `LSTM_A.onnx` p50 593 µs / p99 843 µs; `ulysses_stub identity`
-(Stage 1+3 floor) p50 96 µs / p99 233 µs; `ulysses_stub linear_stub` p50
-5079 µs / p99 9165 µs. The headline number is the floor: Kirk has a
-headroom of roughly p50 497 µs and p99 610 µs to match LSTM_A on this
-hardware before adapter+readout overhead alone exceeds the baseline.
+The Hankel adapter (Stage 1, `scripts/hankel_adapter.py`) and the
+scalar readout (Stage 3, inside `UlyssesPredictor`) remain unchanged.
+Two reference `KirkCore` subclasses ship in `ulysses_predictor.py` for
+measurement: `IdentityKirk` (no-op Stage 2; collapses the pipeline to
+Hankel + a single `(F·m·n) → 1` linear, exposing the Stage-1+3 floor)
+and `LinearStubKirk` (deterministic random `(F·m·n) → K → 1`,
+bounding a worst-case-ish Stage 2). Neither is real Kirk — both are
+shape-and-dtype stand-ins for measuring end-to-end overhead. Latency
+numbers under each mode appear in §5.7.
 
 ### §5.5 Empirical Kirk latency on production hardware (informative)
 
@@ -305,8 +305,8 @@ allocation. Optional CPU pinning is now exposed via `--pin-cpu N`
 warns and continues without pinning).
 
 Before/after on the same `e2-standard-4` rig, batch 1, no CPU pinning
-(before from §5.4 above, 1000 timed; after with the tight window, 100
-warmup + 1000 timed):
+(before from the loose-window driver at commit `56e9985`, 1000 timed;
+after with the tight window, 100 warmup + 1000 timed):
 
 | Config | Before p50 / p99 | After p50 / p99 |
 | --- | ---: | ---: |
