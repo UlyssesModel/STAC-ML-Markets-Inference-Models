@@ -271,7 +271,7 @@ different model implementations can be benchmarked through the same
 harness. They differ in how the input window is sourced and in how much
 surrounding methodology is applied. STAC's driver loads a fixed
 configuration from a YAML file and orchestrates the per-suite (Sumaco /
-Tacaná / ElPopo) timing protocol around a swappable inference backend
+Tacana) timing protocol around a swappable inference backend
 that consumes a pre-materialised NumPy data file produced by the
 harness's configuration-driven feature generator; ours synthesises a
 fresh random tensor per call from `np.random.default_rng`. STAC's driver
