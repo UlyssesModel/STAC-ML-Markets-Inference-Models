@@ -124,17 +124,19 @@ def run_sumaco(
     }
 
 
-PREDICTOR_FACTORIES = {
-    "onnx": ONNXPredictor,
-}
+PREDICTOR_CHOICES = ("onnx", "ulysses_stub")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--model-path", required=True, help="Path to model file (e.g. LSTM_A.onnx)")
+    parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Path to model file (required for --predictor onnx)",
+    )
     parser.add_argument(
         "--predictor",
-        choices=sorted(PREDICTOR_FACTORIES),
+        choices=PREDICTOR_CHOICES,
         default="onnx",
         help="Predictor backend (default: onnx)",
     )
@@ -142,10 +144,36 @@ def main() -> int:
     parser.add_argument("--n-runs", type=int, default=1000)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--ulysses-k",
+        type=int,
+        default=128,
+        help="Kirk-stub projection width (only used with --predictor ulysses_stub)",
+    )
+    parser.add_argument(
+        "--ulysses-m",
+        type=int,
+        default=None,
+        help="Hankel rows m; defaults to T//2 (only used with --predictor ulysses_stub)",
+    )
     parser.add_argument("--output-json", default=None, help="Optional path to write result JSON")
     args = parser.parse_args()
 
-    predictor = PREDICTOR_FACTORIES[args.predictor](args.model_path)
+    if args.predictor == "onnx":
+        if not args.model_path:
+            parser.error("--model-path is required when --predictor onnx")
+        predictor: STACPredictor = ONNXPredictor(args.model_path)
+    elif args.predictor == "ulysses_stub":
+        from ulysses_predictor import UlyssesPredictor
+
+        predictor = UlyssesPredictor(
+            k=args.ulysses_k,
+            m=args.ulysses_m,
+            seed=args.seed,
+        )
+    else:  # pragma: no cover — argparse choices guards this
+        parser.error(f"unknown predictor: {args.predictor}")
+
     result = run_sumaco(
         predictor,
         n_warmup=args.n_warmup,
@@ -153,7 +181,7 @@ def main() -> int:
         batch=args.batch,
         seed=args.seed,
     )
-    result["model_path"] = str(args.model_path)
+    result["model_path"] = str(args.model_path) if args.model_path else None
     result["predictor"] = args.predictor
 
     pretty = json.dumps(result, indent=2)

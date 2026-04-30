@@ -168,6 +168,22 @@ Treat as a black box. No speculation on Kirk internals.
     final `Dense(1)`) or a fixed reduction?
   - Upcast point from BF16 back to the contract dtype.
 
+### §5.4 Reference implementation status
+
+The four files in this repo that implement the staged contracts are:
+`scripts/stac_sumaco_driver.py` (Sumaco-protocol driver and the
+`STACPredictor` ABC), `scripts/hankel_adapter.py` (Stage 1 Hankel transform),
+`scripts/ulysses_predictor.py` (Stages 1–3 wired together with a placeholder
+Kirk core), and `tests/` (assertion-based tests on each — `test_hankel.py`
+and `test_ulysses_predictor.py`).
+
+The placeholder Kirk in `ulysses_predictor.py` produces a real-shaped output
+but no real Kirk compute — it is a deterministic random-init linear
+projection sized to the right input/output, so end-to-end shape, dtype, and
+overhead can be measured before Kirk's real contract lands. Once Jarett's
+contract arrives, the Kirk core is the only stage that needs to change; the
+Hankel adapter and readout shapes are already pinned by §4 of this doc.
+
 ## §6 Cross-cutting open questions
 
 Stage-specific open questions are inline in §5; this section lists
