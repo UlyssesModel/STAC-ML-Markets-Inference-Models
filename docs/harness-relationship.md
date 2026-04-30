@@ -1,5 +1,11 @@
 # Harness Relationship: STAC-ML-Markets-Bench-Harness ↔ this repo
 
+> ⚠️ **Update 2026-04-30 — re-orientation.** This analysis was written under the assumption that the bench harness in `STAC-ML-Markets-Bench-Harness` is the right target for RS-40 work. It is not. STAC publishes a different benchmark protocol (Sumaco / Tacana suites) that drives the `LSTM_A/B/C` artifacts in this repo directly with simulated features — no DeepLOB, no CNN upstream. STAC ships a "Naive" Python+ONNX reference implementation to STAC ML Track subscribers (council@STACresearch.com) that is the actual harness Kavara should be using for STAC-comparable numbers. The DeepLOB harness in the sibling repo is best treated as a private R&D artifact, not the path to RS-40 results.
+>
+> The shape mismatch and "what's reusable" findings below are still empirically correct about the DeepLOB harness. They no longer drive the RS-40 design decision. See `rs40-swap-spec.md` §5 for updated open-question status.
+>
+> Sources: STAC Summit April 2023 (Bishop Brock, Head of Research, STAC) — https://docs.stacresearch.com/system/files/resource/files/STAC-Summit-4-April-2023-stac-ml.pdf; vendor result references at the end of this doc.
+
 ## Purpose
 
 This repo ships the RS-40 inference artifacts (`LSTM_{A,B,C}.{onnx,keras64}`,
@@ -433,3 +439,11 @@ Tradeoffs:
   extractor outside both repos).
 - Con: same numerical-equivalence caveat as Option B: shipped weights
   were not trained on DeepLOB-derived features.
+
+---
+
+## Sources
+
+- STAC Summit April 2023 (Bishop Brock, Head of Research, STAC) — https://docs.stacresearch.com/system/files/resource/files/STAC-Summit-4-April-2023-stac-ml.pdf
+- STAC ML benchmark overview — https://docs.stacresearch.com/ml
+- STAC LSTM inference proof-of-concept — https://docs.stacresearch.com/lstm_inference_poc
