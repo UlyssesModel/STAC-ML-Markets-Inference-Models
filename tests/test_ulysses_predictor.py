@@ -142,6 +142,56 @@ def test_run_sumaco_output_stats() -> None:
     _assert_output_stats(result_onnx, expected_n=100)
 
 
+def test_run_sumaco_with_agreement() -> None:
+    # Baseline: no compare_with — agreement_stats must NOT be present.
+    p = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result_plain = run_sumaco(p, n_warmup=5, n_timed=20, batch=2, seed=0)
+    assert "agreement_stats" not in result_plain, (
+        "agreement_stats must not be present when compare_with is None"
+    )
+
+    # Self-comparison: same predictor on both sides — every metric trivial.
+    p2 = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result_cmp = run_sumaco(
+        p2, n_warmup=5, n_timed=20, batch=2, seed=0, compare_with=p2
+    )
+    assert "agreement_stats" in result_cmp
+    a = result_cmp["agreement_stats"]
+    expected_keys = {
+        "n_pairs",
+        "sign_agreement_pct",
+        "pearson_r",
+        "spearman_rho",
+        "mean_abs_diff",
+        "max_abs_diff",
+        "primary_output_stats",
+        "compared_output_stats",
+    }
+    assert set(a.keys()) == expected_keys, (
+        f"agreement_stats keys mismatch: got {set(a.keys())}, "
+        f"expected {expected_keys}"
+    )
+    assert a["n_pairs"] == 40, f"n_pairs={a['n_pairs']}"
+    assert a["sign_agreement_pct"] == 100.0, (
+        f"self-comparison sign_agreement_pct={a['sign_agreement_pct']}"
+    )
+    assert a["pearson_r"] == 1.0, f"self-comparison pearson_r={a['pearson_r']}"
+    assert a["spearman_rho"] == 1.0, (
+        f"self-comparison spearman_rho={a['spearman_rho']}"
+    )
+    assert a["mean_abs_diff"] == 0.0, (
+        f"self-comparison mean_abs_diff={a['mean_abs_diff']}"
+    )
+    assert a["max_abs_diff"] == 0.0, (
+        f"self-comparison max_abs_diff={a['max_abs_diff']}"
+    )
+
+    # Both nested output-stats blocks have the four expected keys.
+    nested_keys = {"min", "max", "mean", "std"}
+    assert set(a["primary_output_stats"].keys()) == nested_keys
+    assert set(a["compared_output_stats"].keys()) == nested_keys
+
+
 def test_linear_stub_kirk() -> None:
     k = LinearStubKirk(k=64, seed=3)
     F, m, n = 100, 25, 26
@@ -168,6 +218,7 @@ def main() -> int:
     test_identity_kirk()
     test_linear_stub_kirk()
     test_run_sumaco_output_stats()
+    test_run_sumaco_with_agreement()
     print("All UlyssesPredictor tests pass ✓")
     return 0
 

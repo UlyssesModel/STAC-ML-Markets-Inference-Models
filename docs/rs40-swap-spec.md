@@ -334,6 +334,20 @@ quality-check phase. The validation step adds a small fixed
 per-iteration cost outside the timing window, so the latency numbers
 above remain representative.
 
+A further refinement adds *cross-predictor agreement* as the first
+metric the driver produces beyond per-call latency. With
+`--compare-with` set (to `ulysses_stub_identity`,
+`ulysses_stub_linear_stub`, or an `.onnx` model path) the driver
+runs a second predictor untimed on byte-identical input tensors and
+computes sign-agreement percentage, Pearson r, Spearman rho, and
+mean / max absolute difference in pure numpy (no scipy), surfacing
+them under `agreement_stats` in the JSON together with summary stats
+for both predictors' output distributions. With synthetic random
+inputs (this driver's default) the sign-agreement number lands near
+50% as expected, and the correlations are near zero — *meaningful*
+agreement numbers require real STAC features (out of scope for this
+commit).
+
 Remaining gaps versus STAC's reference, called out explicitly: we
 still do not implement separate Tsupply / Tresult timestamps (we
 capture a single perf_counter_ns pair around the predict call rather

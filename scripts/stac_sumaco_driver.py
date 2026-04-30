@@ -51,6 +51,25 @@ docs/rs40-swap-spec.md §5.6. We still do not implement separate
 Tsupply/Tresult timestamps, NMI parallelism, out-of-order result handling,
 or hard-realtime scheduling. Numbers produced here remain relative; they
 are not directly comparable to a STAC-audited result.
+
+Cross-predictor agreement
+-------------------------
+The `--compare-with` flag enables an *untimed* secondary predictor that
+runs on byte-identical input tensors to the primary. After both
+predictors have produced their output buffers, the driver computes
+agreement metrics in pure numpy (no scipy): sign-agreement percentage,
+Pearson r, Spearman rho (rank correlation via `np.argsort(np.argsort(x))`),
+and mean / max absolute difference. Results are surfaced under
+`agreement_stats` in the JSON, alongside summary stats for both
+predictors' output distributions so it's clear whether the agreement
+number is conditioned on similar or wildly different ranges.
+
+With synthetic random inputs (this driver's default) the expected
+sign-agreement is ~50% and the correlations are near zero — meaningful
+agreement numbers require real STAC features. The CLI accepts:
+`ulysses_stub_identity` and `ulysses_stub_linear_stub` (constructed
+with the primary's `(T, F)` shape), or any other string treated as a
+path to an `.onnx` model loaded via `ONNXPredictor`.
 """
 
 from __future__ import annotations
@@ -115,12 +134,51 @@ def _percentile(sorted_us: list[float], q: float) -> float:
     return sorted_us[min(n - 1, int(round(q * n)) - 1)]
 
 
+def _ranks(x: np.ndarray) -> np.ndarray:
+    """Numerical ranks of a 1-D array. Ties broken by index (vanishingly rare for float32)."""
+    return np.argsort(np.argsort(x))
+
+
+def _compute_agreement_stats(a: np.ndarray, b: np.ndarray) -> dict:
+    """Compute cross-predictor agreement metrics over two prediction buffers.
+
+    `a` and `b` may be any shape — they are flattened identically before
+    metrics are computed. All metrics are pure-numpy (no scipy).
+    """
+    a_flat = a.reshape(-1)
+    b_flat = b.reshape(-1)
+    sign_a = a_flat >= 0
+    sign_b = b_flat >= 0
+    diff = np.abs(a_flat - b_flat)
+    return {
+        "n_pairs": int(a_flat.size),
+        "sign_agreement_pct": float((sign_a == sign_b).mean() * 100.0),
+        "pearson_r": float(np.corrcoef(a_flat, b_flat)[0, 1]),
+        "spearman_rho": float(np.corrcoef(_ranks(a_flat), _ranks(b_flat))[0, 1]),
+        "mean_abs_diff": float(diff.mean()),
+        "max_abs_diff": float(diff.max()),
+        "primary_output_stats": {
+            "min": float(a_flat.min()),
+            "max": float(a_flat.max()),
+            "mean": float(a_flat.mean()),
+            "std": float(a_flat.std()),
+        },
+        "compared_output_stats": {
+            "min": float(b_flat.min()),
+            "max": float(b_flat.max()),
+            "mean": float(b_flat.mean()),
+            "std": float(b_flat.std()),
+        },
+    }
+
+
 def run_sumaco(
     predictor: STACPredictor,
     n_warmup: int,
     n_timed: int,
     batch: int,
     seed: int = 0,
+    compare_with: STACPredictor | None = None,
 ) -> dict:
     """Drive `predictor` under the Sumaco protocol and return a result dict.
 
@@ -131,7 +189,14 @@ def run_sumaco(
     contains only the `predict()` call and one int64 latency assignment;
     the prediction store happens outside it. After the timed loop a cheap
     validation phase computes prediction-distribution stats and confirms
-    every sample is finite. See module docstring for the full timing
+    every sample is finite.
+
+    If `compare_with` is provided, it is run (untimed) on the same
+    pre-generated input tensors the primary saw, into a parallel
+    pre-allocated output buffer; the result dict gains an
+    `agreement_stats` block with cross-predictor metrics (sign agreement,
+    Pearson, Spearman, mean / max abs diff). The two predictors must
+    have matching `input_shape`. See module docstring for the full
     methodology.
     """
     T, F = predictor.input_shape
@@ -172,7 +237,7 @@ def run_sumaco(
         )
 
     samples_us = sorted(latencies_ns.astype(np.float64) / 1000.0)
-    return {
+    result = {
         "host": {
             "hostname": socket.gethostname(),
             "cpu_count": os.cpu_count(),
@@ -195,6 +260,27 @@ def run_sumaco(
             "all_finite": all_finite,
         },
     }
+
+    if compare_with is not None:
+        sec_T, sec_F = compare_with.input_shape
+        if (sec_T, sec_F) != (T, F):
+            raise ValueError(
+                f"compare_with predictor input_shape ({sec_T}, {sec_F}) does "
+                f"not match primary ({T}, {F}); shapes must match for "
+                f"cross-comparison"
+            )
+        outputs_b = np.empty((n_timed, batch, 1), dtype=np.float32)
+        for i in range(n_timed):
+            outputs_b[i] = compare_with.predict(inputs[i])
+        if not np.isfinite(outputs_b).all():
+            n_bad = int((~np.isfinite(outputs_b)).sum())
+            raise AssertionError(
+                f"compare_with prediction buffer contains {n_bad} "
+                f"non-finite value(s); cannot compute agreement stats"
+            )
+        result["agreement_stats"] = _compute_agreement_stats(outputs, outputs_b)
+
+    return result
 
 
 def _apply_cpu_pin(cpu: int) -> bool:
@@ -267,6 +353,16 @@ def main() -> int:
         default=None,
         help="Pin this process to the given CPU id before warmup (Linux only)",
     )
+    parser.add_argument(
+        "--compare-with",
+        default=None,
+        help=(
+            "Run a second predictor (untimed) on the same inputs the primary "
+            "saw and report cross-predictor agreement metrics. Accepts "
+            "'ulysses_stub_identity', 'ulysses_stub_linear_stub', or a path "
+            "to an .onnx model."
+        ),
+    )
     args = parser.parse_args()
 
     pin_cpu_applied = False
@@ -304,18 +400,49 @@ def main() -> int:
     else:  # pragma: no cover — argparse choices guards this
         parser.error(f"unknown predictor: {args.predictor}")
 
+    compare_with: STACPredictor | None = None
+    if args.compare_with is not None:
+        primary_T, primary_F = predictor.input_shape
+        spec = args.compare_with
+        if spec == "ulysses_stub_identity":
+            from ulysses_predictor import IdentityKirk, UlyssesPredictor
+
+            compare_with = UlyssesPredictor(
+                t=primary_T,
+                f=primary_F,
+                m=args.ulysses_m,
+                kirk=IdentityKirk(),
+                readout_seed=args.seed,
+            )
+        elif spec == "ulysses_stub_linear_stub":
+            from ulysses_predictor import LinearStubKirk, UlyssesPredictor
+
+            compare_with = UlyssesPredictor(
+                t=primary_T,
+                f=primary_F,
+                m=args.ulysses_m,
+                kirk=LinearStubKirk(k=args.ulysses_k, seed=args.seed),
+                readout_seed=args.seed,
+            )
+        else:
+            # Treat anything else as a path to an .onnx model.
+            compare_with = ONNXPredictor(spec)
+
     result = run_sumaco(
         predictor,
         n_warmup=args.n_warmup,
         n_timed=args.n_runs,
         batch=args.batch,
         seed=args.seed,
+        compare_with=compare_with,
     )
     result["model_path"] = str(args.model_path) if args.model_path else None
     result["predictor"] = args.predictor
     result["pin_cpu"] = args.pin_cpu if pin_cpu_applied else None
     if args.predictor == "ulysses_stub":
         result["kirk_mode"] = args.ulysses_kirk_mode
+    if args.compare_with is not None:
+        result["compare_with"] = args.compare_with
 
     pretty = json.dumps(result, indent=2)
     print(pretty)
