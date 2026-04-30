@@ -21,7 +21,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from stac_sumaco_driver import ONNXPredictor, run_sumaco  # noqa: E402
+from stac_sumaco_driver import ONNXPredictor, run_protocol, run_sumaco  # noqa: E402
 from ulysses_predictor import (  # noqa: E402
     IdentityKirk,
     KirkCore,
@@ -217,6 +217,49 @@ def test_linear_stub_kirk() -> None:
     assert np.array_equal(z, z2), "same-seed LinearStubKirk must be deterministic"
 
 
+def test_run_protocol_sumaco() -> None:
+    p = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result = run_protocol(
+        p, n_warmup=10, n_timed=50, batch=1, seed=0, protocol="sumaco"
+    )
+    assert result["protocol"] == "sumaco", f"got protocol={result['protocol']!r}"
+    assert "tacana_stride" not in result, (
+        "tacana_stride must not appear under the sumaco protocol"
+    )
+    assert result["output_stats"]["n_predictions"] == 50
+    assert result["output_stats"]["all_finite"] is True
+
+
+def test_run_protocol_tacana() -> None:
+    p = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result = run_protocol(
+        p, n_warmup=10, n_timed=50, batch=1, seed=0, protocol="tacana"
+    )
+    assert result["protocol"] == "tacana", f"got protocol={result['protocol']!r}"
+    assert result["tacana_stride"] == 1, (
+        f"default tacana_stride should be 1, got {result['tacana_stride']}"
+    )
+    assert result["output_stats"]["all_finite"] is True
+    assert result["output_stats"]["n_predictions"] == 50
+
+
+def test_tacana_stride() -> None:
+    p = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result = run_protocol(
+        p,
+        n_warmup=10,
+        n_timed=50,
+        batch=1,
+        seed=0,
+        protocol="tacana",
+        tacana_stride=5,
+    )
+    assert result["protocol"] == "tacana"
+    assert result["tacana_stride"] == 5
+    assert result["output_stats"]["n_predictions"] == 50
+    assert result["output_stats"]["all_finite"] is True
+
+
 def main() -> int:
     test_predict_shape()
     test_determinism()
@@ -227,6 +270,9 @@ def main() -> int:
     test_linear_stub_kirk()
     test_run_sumaco_output_stats()
     test_run_sumaco_with_agreement()
+    test_run_protocol_sumaco()
+    test_run_protocol_tacana()
+    test_tacana_stride()
     print("All UlyssesPredictor tests pass ✓")
     return 0
 

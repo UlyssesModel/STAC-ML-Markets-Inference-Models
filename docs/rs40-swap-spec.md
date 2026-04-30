@@ -266,31 +266,54 @@ latency at each N.
 
 `scripts/stac_sumaco_driver.py` in this repo and STAC's reference driver
 (STAC reference implementation, accessed via STAC ML Track membership)
-share the same Sumaco-protocol contract: each inference receives a fixed
-unique window of input features, only the inference call is timed,
-percentiles are reported across a population of timed calls, and the
-inference engine sits behind a swappable predictor abstraction so
+share the same per-call latency contract: only the inference call is
+timed, percentiles are reported across a population of timed calls, and
+the inference engine sits behind a swappable predictor abstraction so
 different model implementations can be benchmarked through the same
-harness. They differ in how the input window is sourced and in how much
-surrounding methodology is applied. STAC's driver loads a fixed
+harness. Both drivers expose the two STAC-ML Markets per-call protocols
+that STAC publishes publicly (Bishop Brock's 2024 STAC-ML Working Group
+deck): **Sumaco** is the event-triggered single-inference suite — each
+call gets an independent unique window of features — and **Tacana** is
+the sliding-window streaming suite — each call rolls one or more new
+timesteps into the window and rolls the same number out, so consecutive
+windows overlap and a SUT is permitted to reuse computations on the
+unchanged portion of the window. On our driver, the only difference
+between the two protocols is how the input is supplied: Sumaco
+pre-generates an `(n_timed, batch, T, F)` block of independent
+fresh-random windows; Tacana pre-generates one `(batch, T + (n_timed - 1)
+× stride, F)` fresh-random stream and slides a `(batch, T, F)` window
+through it. The timed window itself, the latency-buffer pre-allocation,
+the output-buffer pre-allocation, and the post-inference validation
+phase are byte-identical across the two protocols. Real STAC SUTs *may*
+exploit Tacana's overlap for protocol-specific optimisations
+(KV-cache-equivalent state reuse, partial recomputation across
+overlapping windows); our placeholder and ONNX predictors do not. In
+particular, the `LSTM_*` artifacts in this repo ship with
+`stateful=False` (per §2), so per-call recurrence is fully recomputed
+inside one forward pass and the LSTM path pays the same per-call cost
+under both protocols on this driver.
+
+The drivers also differ in how the input window is sourced and in how
+much surrounding methodology is applied. STAC's driver loads a fixed
 configuration from a YAML file and orchestrates the per-suite (Sumaco /
-Tacana) timing protocol around a swappable inference backend
-that consumes a pre-materialised NumPy data file produced by the
-harness's configuration-driven feature generator; ours synthesises a
-fresh random tensor per call from `np.random.default_rng`. STAC's driver
-also layers on machinery our driver does not: per-process CPU affinity
-and realtime scheduling for hard-realtime SUTs, configurable parallel
-evaluation per model instance with explicit out-of-order result handling,
-pre-allocated result storage to suppress allocator-induced latency
-spikes, mid-call wall-clock timestamps (Tsupply / Tresult) bracketing a
-narrow timing window with sample-index computation and result-store
-deliberately *outside* it, and a separate post-inference quality-check
-phase. Our driver is therefore a *protocol-shaped approximation*: the
-timing window and the predictor abstraction match STAC's, but the input
-distribution and the precision of the surrounding measurement do not.
-Numbers it produces are useful for relative comparison between
-predictors on the same rig and are not directly comparable to a
-STAC-audited result.
+Tacana) timing protocol around a swappable inference backend that
+consumes a pre-materialised NumPy data file produced by the harness's
+configuration-driven feature generator; ours synthesises a fresh random
+tensor (Sumaco) or a fresh random stream (Tacana) per run from
+`np.random.default_rng`. STAC's driver also layers on machinery our
+driver does not: per-process CPU affinity and realtime scheduling for
+hard-realtime SUTs, configurable parallel evaluation per model instance
+with explicit out-of-order result handling, pre-allocated result storage
+to suppress allocator-induced latency spikes, mid-call wall-clock
+timestamps (Tsupply / Tresult) bracketing a narrow timing window with
+sample-index computation and result-store deliberately *outside* it,
+and a separate post-inference quality-check phase. Our driver is
+therefore a *protocol-shaped approximation*: the protocol selection,
+the timing window, and the predictor abstraction match STAC's, but the
+input distribution and the precision of the surrounding measurement do
+not. Numbers it produces are useful for relative comparison between
+predictors and protocols on the same rig and are not directly comparable
+to a STAC-audited result.
 
 ### §5.7 Timing methodology refinement (informative)
 

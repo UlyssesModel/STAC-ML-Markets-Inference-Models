@@ -1,16 +1,40 @@
 #!/usr/bin/env python3
-"""STAC-aligned Sumaco-protocol latency driver with a pluggable model interface.
+"""STAC-aligned latency driver (Sumaco + Tacana) with a pluggable model interface.
 
-STAC's Sumaco suite is the event-triggered single-inference latency benchmark
-in the STAC-ML Markets family: each inference receives a *fixed unique window*
-of input features, and the timed quantity is per-call inference latency, not
-streaming throughput. This driver implements that protocol against any model
-that conforms to the `(B, T, F) float32 -> (B, 1) float32` contract shared by
-this repo's `LSTM_*` artifacts.
+Implements the two STAC-ML Markets per-call latency protocols against any
+model that conforms to the `(B, T, F) float32 -> (B, 1) float32` contract
+shared by this repo's `LSTM_*` artifacts.
 
 The driver is deliberately separated from the model behind a `STACPredictor`
 ABC so a Ulysses-based replacement can drop in next to the ONNX baseline
 without touching the timing harness.
+
+Protocols
+---------
+**Sumaco** (event-triggered, default). Each inference receives an
+independent fresh-random `(B, T, F)` window of input features. Inputs for
+the whole timed loop are pre-generated as one `(n_timed, B, T, F)` array
+and the i-th call uses `inputs[i]`. This matches the publicly-documented
+shape of STAC's Sumaco suite — single-inference latency on a unique
+window per call — at the protocol level.
+
+**Tacana** (sliding-window streaming). Each inference advances by
+`tacana_stride` timesteps along a longer fresh-random stream:
+`stride = 1` rolls a single new timestep into the window per call,
+`stride >= T` degenerates to non-overlapping windows. Inputs are
+pre-generated as one `(B, T + (n_timed - 1) * stride, F)` stream and the
+i-th call uses `stream[:, i*stride : i*stride + T, :]`. This mirrors the
+shape of STAC's Tacana suite — sliding-window streaming inference where
+each call's window overlaps with the previous — at the protocol level.
+
+On this driver, the only difference between the two protocols is the
+input distribution; the timed window, the latency / output buffers, the
+post-inference validation phase, and the per-call timing methodology are
+byte-identical. Real STAC SUTs *may* exploit the Tacana overlap for
+optimisations our predictors do not (KV-cache-equivalent state reuse,
+partial recomputation across calls). Our `LSTM_*.onnx` artifacts ship
+with `stateful=False` (per docs/rs40-swap-spec.md §2), so the LSTMs in
+particular pay the same per-call cost under both protocols.
 
 Timing methodology
 ------------------
@@ -193,32 +217,86 @@ def _compute_agreement_stats(a: np.ndarray, b: np.ndarray) -> dict:
     }
 
 
-def run_sumaco(
+def _generate_inputs(
+    protocol: str,
+    rng: np.random.Generator,
+    n_timed: int,
+    batch: int,
+    T: int,
+    F: int,
+    tacana_stride: int,
+) -> "tuple[np.ndarray, callable]":
+    """Pre-generate the timed-loop inputs and return (storage, indexer).
+
+    `storage` holds whatever pre-generated tensor backs the protocol;
+    `indexer(i)` returns the `(batch, T, F) float32` window for call `i`.
+    Both protocols pre-generate all inputs before the timed loop starts so
+    no RNG draws happen inside it.
+
+    Sumaco: `storage` is `(n_timed, batch, T, F)`, indexer returns a fresh
+    independent window each call.
+
+    Tacana: `storage` is `(batch, T + (n_timed - 1) * stride, F)`, indexer
+    returns a sliding view advanced by `tacana_stride` timesteps per call.
+    """
+    if protocol == "sumaco":
+        storage = rng.standard_normal((n_timed, batch, T, F), dtype=np.float32)
+        return storage, (lambda i: storage[i])
+    if protocol == "tacana":
+        if tacana_stride < 1:
+            raise ValueError(f"tacana_stride must be >= 1, got {tacana_stride}")
+        stream_len = T + (n_timed - 1) * tacana_stride
+        storage = rng.standard_normal((batch, stream_len, F), dtype=np.float32)
+
+        def _window(i: int) -> np.ndarray:
+            start = i * tacana_stride
+            view = storage[:, start : start + T, :]
+            # Sliding views over a (B, stream_len, F) array along axis 1 are
+            # already C-contiguous along the last axis, but the window itself
+            # is a non-contiguous slice of the underlying buffer. Some
+            # predictors (notably onnxruntime via DLPack) require contiguous
+            # input — copy if needed.
+            if not view.flags["C_CONTIGUOUS"]:
+                view = np.ascontiguousarray(view)
+            return view
+
+        return storage, _window
+    raise ValueError(f"unknown protocol: {protocol!r} (expected 'sumaco' or 'tacana')")
+
+
+def run_protocol(
     predictor: STACPredictor,
     n_warmup: int,
     n_timed: int,
     batch: int,
     seed: int = 0,
     compare_with: STACPredictor | None = None,
+    protocol: str = "sumaco",
+    tacana_stride: int = 1,
 ) -> dict:
-    """Drive `predictor` under the Sumaco protocol and return a result dict.
+    """Drive `predictor` under the requested STAC-ML protocol and return a result dict.
 
-    Inputs for the timed loop are pre-generated as a single
-    `(n_timed, batch, T, F) float32` array. Latency samples are written into
-    a pre-allocated int64 buffer. Predictions are written into a
-    pre-allocated `(n_timed, batch, 1) float32` buffer. The timed window
-    contains only the `predict()` call and one int64 latency assignment;
-    the prediction store happens outside it. After the timed loop a cheap
-    validation phase computes prediction-distribution stats and confirms
-    every sample is finite.
+    `protocol` selects the input-generation strategy: `"sumaco"`
+    pre-generates one `(n_timed, batch, T, F)` array of independent
+    fresh-random windows; `"tacana"` pre-generates a single
+    `(batch, T + (n_timed - 1) * tacana_stride, F)` stream and slides a
+    `(batch, T, F)` window through it. Per-call timing methodology is
+    identical in both cases — the only difference is the input
+    distribution. See the module docstring's *Protocols* section.
 
-    If `compare_with` is provided, it is run (untimed) on the same
-    pre-generated input tensors the primary saw, into a parallel
-    pre-allocated output buffer; the result dict gains an
-    `agreement_stats` block with cross-predictor metrics (sign agreement,
-    Pearson, Spearman, mean / max abs diff). The two predictors must
-    have matching `input_shape`. See module docstring for the full
-    methodology.
+    Latency samples are written into a pre-allocated int64 buffer.
+    Predictions are written into a pre-allocated `(n_timed, batch, 1)
+    float32` buffer. The timed window contains only the `predict()` call
+    and one int64 latency assignment; the prediction store happens outside
+    it. After the timed loop a cheap validation phase computes
+    prediction-distribution stats and confirms every sample is finite.
+
+    If `compare_with` is provided, it is run (untimed) on the same input
+    windows the primary saw, into a parallel pre-allocated output buffer;
+    the result dict gains an `agreement_stats` block with cross-predictor
+    metrics (sign agreement, Pearson, Spearman, mean / max abs diff and
+    their z-scored variants). The two predictors must have matching
+    `input_shape`. See module docstring for the full methodology.
     """
     T, F = predictor.input_shape
     rng = np.random.default_rng(seed)
@@ -227,12 +305,14 @@ def run_sumaco(
         x = rng.standard_normal((batch, T, F), dtype=np.float32)
         predictor.predict(x)
 
-    inputs = rng.standard_normal((n_timed, batch, T, F), dtype=np.float32)
+    _input_storage, window_at = _generate_inputs(
+        protocol, rng, n_timed, batch, T, F, tacana_stride
+    )
     latencies_ns = np.empty(n_timed, dtype=np.int64)
     outputs = np.empty((n_timed, batch, 1), dtype=np.float32)
 
     for i in range(n_timed):
-        x = inputs[i]
+        x = window_at(i)
         t0 = time.perf_counter_ns()
         y = predictor.predict(x)
         t1 = time.perf_counter_ns()
@@ -263,6 +343,7 @@ def run_sumaco(
             "hostname": socket.gethostname(),
             "cpu_count": os.cpu_count(),
         },
+        "protocol": protocol,
         "n_warmup": n_warmup,
         "n_timed": n_timed,
         "batch_size": batch,
@@ -281,6 +362,8 @@ def run_sumaco(
             "all_finite": all_finite,
         },
     }
+    if protocol == "tacana":
+        result["tacana_stride"] = tacana_stride
 
     if compare_with is not None:
         sec_T, sec_F = compare_with.input_shape
@@ -292,7 +375,7 @@ def run_sumaco(
             )
         outputs_b = np.empty((n_timed, batch, 1), dtype=np.float32)
         for i in range(n_timed):
-            outputs_b[i] = compare_with.predict(inputs[i])
+            outputs_b[i] = compare_with.predict(window_at(i))
         if not np.isfinite(outputs_b).all():
             n_bad = int((~np.isfinite(outputs_b)).sum())
             raise AssertionError(
@@ -302,6 +385,31 @@ def run_sumaco(
         result["agreement_stats"] = _compute_agreement_stats(outputs, outputs_b)
 
     return result
+
+
+def run_sumaco(
+    predictor: STACPredictor,
+    n_warmup: int,
+    n_timed: int,
+    batch: int,
+    seed: int = 0,
+    compare_with: STACPredictor | None = None,
+) -> dict:
+    """Backward-compatible wrapper: drive `predictor` under the Sumaco protocol.
+
+    Equivalent to `run_protocol(..., protocol="sumaco")`. Retained so
+    existing callers (notably `tests/test_ulysses_predictor.py`) keep
+    working unchanged.
+    """
+    return run_protocol(
+        predictor,
+        n_warmup=n_warmup,
+        n_timed=n_timed,
+        batch=batch,
+        seed=seed,
+        compare_with=compare_with,
+        protocol="sumaco",
+    )
 
 
 def _apply_cpu_pin(cpu: int) -> bool:
@@ -384,7 +492,31 @@ def main() -> int:
             "to an .onnx model."
         ),
     )
+    parser.add_argument(
+        "--protocol",
+        choices=("sumaco", "tacana"),
+        default="sumaco",
+        help=(
+            "STAC-ML protocol to drive: 'sumaco' (independent fresh-random "
+            "window per call) or 'tacana' (sliding window over a longer "
+            "fresh-random stream). See the module docstring for protocol "
+            "shapes. Default: sumaco."
+        ),
+    )
+    parser.add_argument(
+        "--tacana-stride",
+        type=int,
+        default=1,
+        help=(
+            "Per-call stride (in timesteps) along the Tacana stream. "
+            "stride=1 rolls one new timestep into the window per call; "
+            "stride>=T degenerates to non-overlapping windows. Ignored "
+            "when --protocol sumaco. Default: 1."
+        ),
+    )
     args = parser.parse_args()
+    if args.tacana_stride < 1:
+        parser.error(f"--tacana-stride must be >= 1, got {args.tacana_stride}")
 
     pin_cpu_applied = False
     if args.pin_cpu is not None:
@@ -449,13 +581,15 @@ def main() -> int:
             # Treat anything else as a path to an .onnx model.
             compare_with = ONNXPredictor(spec)
 
-    result = run_sumaco(
+    result = run_protocol(
         predictor,
         n_warmup=args.n_warmup,
         n_timed=args.n_runs,
         batch=args.batch,
         seed=args.seed,
         compare_with=compare_with,
+        protocol=args.protocol,
+        tacana_stride=args.tacana_stride,
     )
     result["model_path"] = str(args.model_path) if args.model_path else None
     result["predictor"] = args.predictor
