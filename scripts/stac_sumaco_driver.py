@@ -156,6 +156,12 @@ def main() -> int:
         default=None,
         help="Hankel rows m; defaults to T//2 (only used with --predictor ulysses_stub)",
     )
+    parser.add_argument(
+        "--ulysses-kirk-mode",
+        choices=("linear_stub", "identity"),
+        default="linear_stub",
+        help="Stage-2 mode for ulysses_stub predictor (default: linear_stub)",
+    )
     parser.add_argument("--output-json", default=None, help="Optional path to write result JSON")
     args = parser.parse_args()
 
@@ -170,6 +176,7 @@ def main() -> int:
             k=args.ulysses_k,
             m=args.ulysses_m,
             seed=args.seed,
+            kirk_mode=args.ulysses_kirk_mode,
         )
     else:  # pragma: no cover — argparse choices guards this
         parser.error(f"unknown predictor: {args.predictor}")
@@ -183,6 +190,8 @@ def main() -> int:
     )
     result["model_path"] = str(args.model_path) if args.model_path else None
     result["predictor"] = args.predictor
+    if args.predictor == "ulysses_stub":
+        result["kirk_mode"] = args.ulysses_kirk_mode
 
     pretty = json.dumps(result, indent=2)
     print(pretty)

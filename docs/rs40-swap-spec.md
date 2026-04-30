@@ -184,6 +184,18 @@ overhead can be measured before Kirk's real contract lands. Once Jarett's
 contract arrives, the Kirk core is the only stage that needs to change; the
 Hankel adapter and readout shapes are already pinned by §4 of this doc.
 
+`ulysses_predictor.py` exposes two reference Stage-2 modes for measurement:
+`linear_stub` (a brute-force `(F·m·n) → K → 1` matmul that bounds a
+worst-case-ish Stage 2) and `identity` (a no-op Stage 2 that collapses the
+pipeline to Hankel + a single `(F·m·n) → 1` linear, giving the floor cost of
+Stages 1 and 3 alone). Sumaco-protocol latency on the local
+`e2-standard-4` rig (50 warmup + 1000 timed, batch 1, Sumaco fixed-unique
+window): `LSTM_A.onnx` p50 593 µs / p99 843 µs; `ulysses_stub identity`
+(Stage 1+3 floor) p50 96 µs / p99 233 µs; `ulysses_stub linear_stub` p50
+5079 µs / p99 9165 µs. The headline number is the floor: Kirk has a
+headroom of roughly p50 497 µs and p99 610 µs to match LSTM_A on this
+hardware before adapter+readout overhead alone exceeds the baseline.
+
 ## §6 Cross-cutting open questions
 
 Stage-specific open questions are inline in §5; this section lists

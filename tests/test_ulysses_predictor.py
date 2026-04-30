@@ -51,10 +51,28 @@ def test_seed_reproducibility() -> None:
     assert not np.array_equal(y_a, y_c), "different seeds must produce different outputs"
 
 
+def test_identity_mode() -> None:
+    p = UlyssesPredictor(kirk_mode="identity")
+    assert p.kirk_mode == "identity"
+    rng = np.random.default_rng(0)
+    for B in (1, 4):
+        x = rng.standard_normal((B, 50, 100), dtype=np.float32)
+        y = p.predict(x)
+        assert y.shape == (B, 1), f"identity B={B}: got shape {y.shape}"
+        assert y.dtype == np.float32, f"identity B={B}: got dtype {y.dtype}"
+
+    p_det = UlyssesPredictor(kirk_mode="identity", seed=11)
+    x = np.random.default_rng(0).standard_normal((2, 50, 100), dtype=np.float32)
+    y1 = p_det.predict(x)
+    y2 = p_det.predict(x)
+    assert np.array_equal(y1, y2), "identity mode must be deterministic across calls"
+
+
 def main() -> int:
     test_predict_shape()
     test_determinism()
     test_seed_reproducibility()
+    test_identity_mode()
     print("All UlyssesPredictor tests pass ✓")
     return 0
 
