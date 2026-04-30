@@ -1,5 +1,7 @@
 # STAC-ML Markets — Inference Models
 
+[![CI](https://github.com/UlyssesModel/STAC-ML-Markets-Inference-Models/actions/workflows/ci.yml/badge.svg)](https://github.com/UlyssesModel/STAC-ML-Markets-Inference-Models/actions/workflows/ci.yml)
+
 Reference inference-model bundle for the STAC-ML Markets benchmark. STAC-ML Markets is a vendor-neutral benchmark from the Securities Technology Analysis Center (STAC) for measuring inference of trained ML models on financial-market workloads. RS-40 is the reference solution / model release that this repository ships: a fixed set of pre-trained models, their untrained null baselines, and the input/output contracts the test harness will drive.
 
 This repo contains only the **inference artifacts** — `.onnx` for cross-runtime use and the original framework-native dumps (`.keras64` TensorFlow SavedModels, `.lgb` LightGBM dumps) for reference. Training code, datasets, and harness code live elsewhere.
@@ -86,6 +88,24 @@ python scripts/verify_io.py
 ```
 
 Requires `onnx`, `onnxruntime`, `tensorflow`, and `numpy` — all installed in the bundled `.venv/`.
+
+## Continuous Integration
+
+GitHub Actions runs on every push to `master` and every pull request against `master` (`.github/workflows/ci.yml`). The job is intentionally narrow: it catches regressions in the code under `scripts/` and `tests/` (Hankel adapter, `UlyssesPredictor`, the Sumaco driver, the cross-predictor agreement metrics) without burning the public LFS bandwidth quota.
+
+CI runs:
+
+- `tests/test_hankel.py` and `tests/test_ulysses_predictor.py`.
+- A short Sumaco smoke against `LSTM_A.onnx` (`--predictor onnx`, 10 warmup + 50 timed).
+- A short Sumaco smoke against the `UlyssesPredictor` identity stub (no model file needed).
+- A cross-predictor agreement smoke (`LSTM_A.onnx` vs `ulysses_stub_identity`) to exercise the `--compare-with` code path.
+
+CI deliberately does **not**:
+
+- Run `scripts/verify_io.py` over the full model set. The full LFS payload is ~600 MB and the public-repo free tier only allows 1 GB/month of LFS bandwidth. CI selectively pulls only `LSTM_A.onnx` (~640 KB) via `git lfs pull --include="LSTM_A.onnx"`; everything else stays as a 133-byte pointer file in the CI workspace.
+- Load any `.keras64/` SavedModel. That would require pulling the large `variables/` directories from LFS and installing TensorFlow, neither of which is justified for code-regression coverage. Full multi-model and multi-framework verification (`onnxruntime` + `tensorflow` + `lightgbm` against every artifact) remains a pre-release manual step on the reference VM, where the full LFS payload is already materialised.
+
+CI installs only `onnx`, `onnxruntime`, and `numpy`. Total runtime is well under 90 seconds on `ubuntu-latest`; per-run LFS bandwidth is ~640 KB.
 
 ## Reproducing and extending
 

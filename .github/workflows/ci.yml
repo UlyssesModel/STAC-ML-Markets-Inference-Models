@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (LFS disabled)
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pull only LSTM_A.onnx from LFS
+        run: git lfs pull --include="LSTM_A.onnx"
+
+      - name: Verify LSTM_A.onnx was fetched (not still a pointer file)
+        run: |
+          ls -lh LSTM_A.onnx
+          size=$(stat -c%s LSTM_A.onnx)
+          echo "LSTM_A.onnx size: ${size} bytes"
+          if [ "$size" -lt 100000 ]; then
+            echo "::error::LSTM_A.onnx is only ${size} bytes — git lfs pull silently failed (pointer file still in place)"
+            exit 1
+          fi
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install onnx onnxruntime numpy
+
+      - name: Run Hankel adapter tests
+        run: python tests/test_hankel.py
+
+      - name: Run UlyssesPredictor tests
+        run: python tests/test_ulysses_predictor.py
+
+      - name: Sumaco driver smoke (ONNX, LSTM_A)
+        run: |
+          python scripts/stac_sumaco_driver.py \
+            --predictor onnx \
+            --model-path LSTM_A.onnx \
+            --n-warmup 10 --n-runs 50 \
+            --output-json /tmp/ci_smoke.json
+          cat /tmp/ci_smoke.json
+
+      - name: Sumaco driver smoke (UlyssesPredictor identity)
+        run: |
+          python scripts/stac_sumaco_driver.py \
+            --predictor ulysses_stub \
+            --ulysses-kirk-mode identity \
+            --n-warmup 10 --n-runs 50 \
+            --output-json /tmp/ci_ulysses_smoke.json
+          cat /tmp/ci_ulysses_smoke.json
+
+      - name: Cross-predictor agreement smoke (LSTM_A vs ulysses identity)
+        run: |
+          python scripts/stac_sumaco_driver.py \
+            --predictor onnx \
+            --model-path LSTM_A.onnx \
+            --compare-with ulysses_stub_identity \
+            --n-warmup 10 --n-runs 50 \
+            --output-json /tmp/ci_agree_smoke.json
+          cat /tmp/ci_agree_smoke.json
