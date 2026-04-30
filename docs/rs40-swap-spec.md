@@ -323,16 +323,25 @@ methodology change alone. The point of the change is the methodology
 itself, not these specific numbers; relative comparisons taken under
 the new methodology will be cleaner going forward.
 
-Remaining gaps versus STAC's reference, called out explicitly: we still
-do not implement separate Tsupply / Tresult timestamps (we capture a
-single perf_counter_ns pair around the predict call rather than
-splitting the boundary between data supply and result return); we do
-not run NMI parallelism (multiple model instances inferring
+A follow-on refinement closed one of the gaps: predictions are now
+written into a pre-allocated `(n_timed, batch, 1) float32` buffer via
+index-assignment outside the timed window, and a post-inference
+validation phase verifies shape/dtype, asserts every sample is finite,
+and records min / max / mean / std under `output_stats` in the result
+JSON. This brings the driver one step closer to STAC's reference,
+which uses the stored-results pattern for its post-inference
+quality-check phase. The validation step adds a small fixed
+per-iteration cost outside the timing window, so the latency numbers
+above remain representative.
+
+Remaining gaps versus STAC's reference, called out explicitly: we
+still do not implement separate Tsupply / Tresult timestamps (we
+capture a single perf_counter_ns pair around the predict call rather
+than splitting the boundary between data supply and result return);
+we do not run NMI parallelism (multiple model instances inferring
 concurrently); we do not implement out-of-order result handling for
-parallel mode; we discard the `(B, 1)` predictions rather than
-storing them in a pre-allocated output buffer; and we do not invoke
-realtime scheduling. Closing any of those is a separate step beyond
-this refinement.
+parallel mode; and we do not invoke realtime scheduling. Closing any
+of those is a separate step beyond this refinement.
 
 ## §6 Cross-cutting open questions
 

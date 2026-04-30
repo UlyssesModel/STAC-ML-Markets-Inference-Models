@@ -21,6 +21,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from stac_sumaco_driver import ONNXPredictor, run_sumaco  # noqa: E402
 from ulysses_predictor import (  # noqa: E402
     IdentityKirk,
     KirkCore,
@@ -116,6 +117,31 @@ def test_identity_kirk() -> None:
     assert z.dtype == np.float32, f"got dtype {z.dtype}"
 
 
+def _assert_output_stats(result: dict, expected_n: int) -> None:
+    assert "output_stats" in result, "result missing output_stats"
+    stats = result["output_stats"]
+    expected_keys = {"n_predictions", "min", "max", "mean", "std", "all_finite"}
+    assert set(stats.keys()) == expected_keys, (
+        f"output_stats keys mismatch: got {set(stats.keys())}, "
+        f"expected {expected_keys}"
+    )
+    assert stats["n_predictions"] == expected_n, (
+        f"n_predictions={stats['n_predictions']}, expected {expected_n}"
+    )
+    assert stats["all_finite"] is True, "all_finite should be True"
+
+
+def test_run_sumaco_output_stats() -> None:
+    p_ulysses = UlyssesPredictor(kirk=IdentityKirk(), readout_seed=0)
+    result = run_sumaco(p_ulysses, n_warmup=10, n_timed=50, batch=2, seed=0)
+    _assert_output_stats(result, expected_n=100)
+
+    onnx_path = REPO_ROOT / "LSTM_A.onnx"
+    p_onnx = ONNXPredictor(onnx_path)
+    result_onnx = run_sumaco(p_onnx, n_warmup=10, n_timed=50, batch=2, seed=0)
+    _assert_output_stats(result_onnx, expected_n=100)
+
+
 def test_linear_stub_kirk() -> None:
     k = LinearStubKirk(k=64, seed=3)
     F, m, n = 100, 25, 26
@@ -141,6 +167,7 @@ def main() -> int:
     test_kirkcore_abc_compliance()
     test_identity_kirk()
     test_linear_stub_kirk()
+    test_run_sumaco_output_stats()
     print("All UlyssesPredictor tests pass ✓")
     return 0
 

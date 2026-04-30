@@ -16,7 +16,8 @@ Timing methodology
 ------------------
 The timed window is restricted to exactly the predictor's `predict()` call
 between two `time.perf_counter_ns()` reads. Everything else — RNG draws,
-tensor allocation, latency-buffer growth — is pushed outside the window:
+tensor allocation, latency-buffer growth, prediction storage — is pushed
+outside the window:
 
 * Input tensors for the entire timed loop are pre-generated as a single
   `(n_timed, batch, T, F) float32` array, drawn from the seeded RNG
@@ -27,17 +28,29 @@ tensor allocation, latency-buffer growth — is pushed outside the window:
   dtype=np.int64)` buffer via index-assignment. No Python list growth
   inside the timed window.
 
+* Predictions are stored into a pre-allocated `np.empty((n_timed, batch,
+  1), dtype=np.float32)` buffer. The index-assignment is performed
+  *outside* the timed window — between the latency write and the next
+  iteration's `t0` read — so the only work inside the window remains
+  the `predict()` call plus the int64 latency assign.
+
 * CPU pinning is optional via `--pin-cpu N`, which calls
   `os.sched_setaffinity(0, {N})` once before warmup. Linux-only;
   non-Linux platforms print a warning and continue without pinning.
+
+* After the timed loop, a post-inference validation phase verifies the
+  output buffer's shape and dtype, asserts every prediction is finite,
+  and computes summary stats (min / max / mean / std). Surfaced under
+  `output_stats` in the result JSON. This brings us one step closer to
+  STAC's reference, which uses the stored-results pattern for its
+  post-inference quality-check phase.
 
 This brings our driver methodologically closer to audit-grade harnesses
 while remaining a *protocol-shaped approximation* of STAC's reference, per
 docs/rs40-swap-spec.md §5.6. We still do not implement separate
 Tsupply/Tresult timestamps, NMI parallelism, out-of-order result handling,
-pre-allocated output buffers, or hard-realtime scheduling. Numbers
-produced here remain relative; they are not directly comparable to a
-STAC-audited result.
+or hard-realtime scheduling. Numbers produced here remain relative; they
+are not directly comparable to a STAC-audited result.
 """
 
 from __future__ import annotations
@@ -113,8 +126,13 @@ def run_sumaco(
 
     Inputs for the timed loop are pre-generated as a single
     `(n_timed, batch, T, F) float32` array. Latency samples are written into
-    a pre-allocated int64 buffer. The timed window contains only the
-    `predict()` call. See module docstring for the full timing methodology.
+    a pre-allocated int64 buffer. Predictions are written into a
+    pre-allocated `(n_timed, batch, 1) float32` buffer. The timed window
+    contains only the `predict()` call and one int64 latency assignment;
+    the prediction store happens outside it. After the timed loop a cheap
+    validation phase computes prediction-distribution stats and confirms
+    every sample is finite. See module docstring for the full timing
+    methodology.
     """
     T, F = predictor.input_shape
     rng = np.random.default_rng(seed)
@@ -125,13 +143,33 @@ def run_sumaco(
 
     inputs = rng.standard_normal((n_timed, batch, T, F), dtype=np.float32)
     latencies_ns = np.empty(n_timed, dtype=np.int64)
+    outputs = np.empty((n_timed, batch, 1), dtype=np.float32)
 
     for i in range(n_timed):
         x = inputs[i]
         t0 = time.perf_counter_ns()
-        _ = predictor.predict(x)
+        y = predictor.predict(x)
         t1 = time.perf_counter_ns()
         latencies_ns[i] = t1 - t0
+        outputs[i] = y       # outside the timing window
+
+    if outputs.shape != (n_timed, batch, 1):
+        raise AssertionError(
+            f"output buffer shape mismatch: expected ({n_timed}, {batch}, 1), "
+            f"got {outputs.shape}"
+        )
+    if outputs.dtype != np.float32:
+        raise AssertionError(
+            f"output buffer dtype mismatch: expected float32, got {outputs.dtype}"
+        )
+    flat = outputs.reshape(-1)
+    all_finite = bool(np.isfinite(flat).all())
+    if not all_finite:
+        n_bad = int((~np.isfinite(flat)).sum())
+        raise AssertionError(
+            f"prediction buffer contains {n_bad} non-finite value(s) "
+            f"out of {flat.size}; check predictor for NaN/Inf"
+        )
 
     samples_us = sorted(latencies_ns.astype(np.float64) / 1000.0)
     return {
@@ -148,6 +186,14 @@ def run_sumaco(
         "p99_us": _percentile(samples_us, 0.99),
         "mean_us": statistics.fmean(samples_us),
         "std_us": statistics.pstdev(samples_us),
+        "output_stats": {
+            "n_predictions": int(flat.size),
+            "min": float(flat.min()),
+            "max": float(flat.max()),
+            "mean": float(flat.mean()),
+            "std": float(flat.std()),
+            "all_finite": all_finite,
+        },
     }
 
 
