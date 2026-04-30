@@ -86,3 +86,11 @@ python scripts/verify_io.py
 ```
 
 Requires `onnx`, `onnxruntime`, `tensorflow`, and `numpy` — all installed in the bundled `.venv/`.
+
+## Reproducing and extending
+
+This repo ships **artifacts only** (model weights + ONNX exports). To run the RS-40 benchmark end to end, you also need the **bench harness** — driver code that produces `(50, 100)` features from raw market data, drives the model, and applies the sign-of-imag readout. The harness is not included here.
+
+To **extend** the benchmark — train new models, swap in a Ulysses replacement, etc. — you also need the **training code** and the **labeled market data** the original LSTM/GBT models were trained on. Neither is in this repo.
+
+A local latency baseline (`bench_results.json`, produced by `scripts/benchmark_io.py`) was measured on a `stac-claude-dev` `e2-standard-4` GCP VM (4 vCPU, no GPU, no AMX). These numbers are **not comparable** to RS-40 production hardware budgets; treat them as a relative baseline among the models in this repo, not as an absolute claim.

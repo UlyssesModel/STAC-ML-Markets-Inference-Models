@@ -1,0 +1,189 @@
+{
+  "host": {
+    "hostname": "stac-claude-dev.us-central1-a.c.office-of-cto-491318.internal",
+    "cpu_count": 4,
+    "machine_type": "e2-standard-4"
+  },
+  "results": [
+    {
+      "name": "LSTM_A.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 569.723,
+      "p99_us": 890.174,
+      "mean_us": 591.938697,
+      "std_us": 66.96624038798349
+    },
+    {
+      "name": "LSTM_A.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 13469.727,
+      "p99_us": 17612.967,
+      "mean_us": 13652.050765,
+      "std_us": 1348.1094206881946
+    },
+    {
+      "name": "LSTM_B.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 4294.36,
+      "p99_us": 5497.048,
+      "mean_us": 4384.317067,
+      "std_us": 289.60045918748904
+    },
+    {
+      "name": "LSTM_B.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 67684.321,
+      "p99_us": 77689.098,
+      "mean_us": 68176.43888,
+      "std_us": 2896.044225798664
+    },
+    {
+      "name": "LSTM_C.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 193470.071,
+      "p99_us": 244644.383,
+      "mean_us": 196617.471378,
+      "std_us": 30825.266420292304
+    },
+    {
+      "name": "LSTM_C.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 1218123.473,
+      "p99_us": 1373955.795,
+      "mean_us": 1227316.6823749999,
+      "std_us": 43162.9159907601
+    },
+    {
+      "name": "LSTM_Null_A.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 16.774,
+      "p99_us": 36.711,
+      "mean_us": 17.755995,
+      "std_us": 3.63908452127386
+    },
+    {
+      "name": "LSTM_Null_A.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 393.742,
+      "p99_us": 607.728,
+      "mean_us": 414.21790500000003,
+      "std_us": 65.45032077412588
+    },
+    {
+      "name": "LSTM_Null_B.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 73.485,
+      "p99_us": 152.589,
+      "mean_us": 75.12388,
+      "std_us": 18.649599130748094
+    },
+    {
+      "name": "LSTM_Null_B.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 413.676,
+      "p99_us": 554.102,
+      "mean_us": 417.807545,
+      "std_us": 41.15194688806321
+    },
+    {
+      "name": "LSTM_Null_C.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 150.714,
+      "p99_us": 227.35,
+      "mean_us": 153.998727,
+      "std_us": 20.22967789467917
+    },
+    {
+      "name": "LSTM_Null_C.keras64",
+      "runtime": "tf.saved_model",
+      "warmup_runs": 100,
+      "timed_runs": 200,
+      "p50_us": 490.674,
+      "p99_us": 681.439,
+      "mean_us": 501.627955,
+      "std_us": 63.51330769313605
+    },
+    {
+      "name": "GBT_A.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 25.74,
+      "p99_us": 109.499,
+      "mean_us": 29.51141,
+      "std_us": 44.55580621355538
+    },
+    {
+      "name": "GBT_B.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 76.92,
+      "p99_us": 228.302,
+      "mean_us": 85.244188,
+      "std_us": 38.1850873408541
+    },
+    {
+      "name": "GBT_C.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 581.807,
+      "p99_us": 688.61,
+      "mean_us": 587.375851,
+      "std_us": 29.043218175002558
+    },
+    {
+      "name": "GBT_Null_A.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 8.672,
+      "p99_us": 30.829,
+      "mean_us": 10.869107,
+      "std_us": 9.027175158351088
+    },
+    {
+      "name": "GBT_Null_B.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 8.052,
+      "p99_us": 19.719,
+      "mean_us": 8.377599,
+      "std_us": 2.9446686051572932
+    },
+    {
+      "name": "GBT_Null_C.onnx",
+      "runtime": "onnxruntime",
+      "warmup_runs": 100,
+      "timed_runs": 1000,
+      "p50_us": 10.057,
+      "p99_us": 32.614,
+      "mean_us": 12.316213,
+      "std_us": 9.02452636284204
+    }
+  ]
+}
