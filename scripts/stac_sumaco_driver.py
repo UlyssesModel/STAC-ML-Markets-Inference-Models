@@ -59,10 +59,25 @@ runs on byte-identical input tensors to the primary. After both
 predictors have produced their output buffers, the driver computes
 agreement metrics in pure numpy (no scipy): sign-agreement percentage,
 Pearson r, Spearman rho (rank correlation via `np.argsort(np.argsort(x))`),
-and mean / max absolute difference. Results are surfaced under
+and mean / max absolute difference, plus scale-normalised `_z` variants
+of the absolute-difference metrics. Results are surfaced under
 `agreement_stats` in the JSON, alongside summary stats for both
 predictors' output distributions so it's clear whether the agreement
 number is conditioned on similar or wildly different ranges.
+
+Pearson r and Spearman rho are already scale-invariant, so they reflect
+rank/sign-relevant agreement regardless of the two predictors' output
+magnitudes. `mean_abs_diff` and `max_abs_diff` are scale-dependent and
+therefore useful for diagnosing scale mismatch between predictors (e.g.
+`LSTM_A` vs an unscaled Ulysses-stub readout, where one predictor's
+output range dwarfs the other's and the raw diff is dominated by that
+gap). The companion `mean_abs_diff_z` and `max_abs_diff_z` z-score each
+predictor's output independently before differencing
+(`(x - x.mean()) / (x.std() + eps)` with `eps = 1e-12` to handle a
+degenerate constant predictor), so on synthetic-input runs the
+agreement numbers reflect rank/sign disagreement rather than just
+output-magnitude differences. Both raw and z-scored variants are kept
+because each diagnoses a different failure mode.
 
 With synthetic random inputs (this driver's default) the expected
 sign-agreement is ~50% and the correlations are near zero — meaningful
@@ -150,6 +165,10 @@ def _compute_agreement_stats(a: np.ndarray, b: np.ndarray) -> dict:
     sign_a = a_flat >= 0
     sign_b = b_flat >= 0
     diff = np.abs(a_flat - b_flat)
+    eps = 1e-12
+    a_z = (a_flat - a_flat.mean()) / (a_flat.std() + eps)
+    b_z = (b_flat - b_flat.mean()) / (b_flat.std() + eps)
+    diff_z = np.abs(a_z - b_z)
     return {
         "n_pairs": int(a_flat.size),
         "sign_agreement_pct": float((sign_a == sign_b).mean() * 100.0),
@@ -157,6 +176,8 @@ def _compute_agreement_stats(a: np.ndarray, b: np.ndarray) -> dict:
         "spearman_rho": float(np.corrcoef(_ranks(a_flat), _ranks(b_flat))[0, 1]),
         "mean_abs_diff": float(diff.mean()),
         "max_abs_diff": float(diff.max()),
+        "mean_abs_diff_z": float(diff_z.mean()),
+        "max_abs_diff_z": float(diff_z.max()),
         "primary_output_stats": {
             "min": float(a_flat.min()),
             "max": float(a_flat.max()),

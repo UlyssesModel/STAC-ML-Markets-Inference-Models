@@ -164,6 +164,8 @@ def test_run_sumaco_with_agreement() -> None:
         "spearman_rho",
         "mean_abs_diff",
         "max_abs_diff",
+        "mean_abs_diff_z",
+        "max_abs_diff_z",
         "primary_output_stats",
         "compared_output_stats",
     }
@@ -184,6 +186,12 @@ def test_run_sumaco_with_agreement() -> None:
     )
     assert a["max_abs_diff"] == 0.0, (
         f"self-comparison max_abs_diff={a['max_abs_diff']}"
+    )
+    assert a["mean_abs_diff_z"] == 0.0, (
+        f"self-comparison mean_abs_diff_z={a['mean_abs_diff_z']}"
+    )
+    assert a["max_abs_diff_z"] == 0.0, (
+        f"self-comparison max_abs_diff_z={a['max_abs_diff_z']}"
     )
 
     # Both nested output-stats blocks have the four expected keys.

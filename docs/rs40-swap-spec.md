@@ -223,6 +223,9 @@ into the full pipeline:
 3. Construct `UlyssesPredictor(kirk=YourKirk(...))` to plug it into
    the full `(B, 50, 100) -> (B, 1)` pipeline.
 
+For a step-by-step guide to dropping a `KirkCore` implementation into
+the pipeline, see `docs/kirk-integration-runbook.md`.
+
 The Hankel adapter (Stage 1, `scripts/hankel_adapter.py`) and the
 scalar readout (Stage 3, inside `UlyssesPredictor`) remain unchanged.
 Two reference `KirkCore` subclasses ship in `ulysses_predictor.py` for
