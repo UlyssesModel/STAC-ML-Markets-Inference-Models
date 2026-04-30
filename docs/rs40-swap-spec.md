@@ -147,16 +147,38 @@ Stages:
 
 ### Stage 2: Kirk core
 
-Treat as a black box. No speculation on Kirk internals.
+External-API black box; no speculation on Kirk internals. The bullets below
+are *externally observable facts* about Kirk's compute model from Jarett
+Artman's 2026-04-20 cross-platform affinity study (Kavara internal — see
+§5.5), not internals. Inputs/outputs of Stage 2 in the contract sense
+remain TBD by Kirk's external API; this is informative context, not a
+redefinition of the contract.
 
-- **Inputs accepted:** whatever the Hankel adapter produces (BF16, shape TBD
-  by Kirk).
+- **Compute model:** complex N×N BF16 matmul, decomposed into 4 real BF16
+  matmuls via `(A+iB)(C+iD) = (AC − BD) + i(AD + BC)`, dispatched through
+  PyTorch oneDNN to AMX (Intel) or AVX-512 / NEON elsewhere.
+- **Inference variants exposed:** five — `active_inference`,
+  `active_inference_ent`, `active_inference_feat`, `inf_entropy`,
+  `inf_features`. They have different latency/output characteristics; the
+  swap may target one or several.
+- **Production hardware target:** Granite Rapids under TDX (GNR+TDX),
+  32-thread close OpenMP (`OMP_PROC_BIND=close`, `OMP_PLACES=cores`).
+- **Production N range:** `100 ≤ N ≤ 2000` per Hankel-embedding sizes used
+  in deployed Ulysses pipelines.
+- **Hard adapter requirement:** complex tensors must be `.contiguous()`
+  *before* BF16 casting, or oneDNN takes a 7–12 ms/call reorder hit at
+  N=1000. The replacement adapter must produce contiguous `ab::f0`-blocked
+  BF16 inputs.
+
+- **Inputs accepted:** whatever the Hankel adapter produces (BF16, exact
+  rank/shape and the precise external API are TBD by Kirk).
 - **Outputs produced:** a representation the readout consumes (shape and
   dtype TBD by Kirk).
 - **Stage-specific open questions:**
   - Kirk's declared input/output contract — must be pinned before the
     Hankel-adapter and readout shapes can be finalized.
   - Determinism guarantees under BF16 matmul (relevant to §4(4)).
+  - Which of the five inference variants is the RS-40 swap target.
 
 ### Stage 3: Scalar readout
 
@@ -196,6 +218,32 @@ window): `LSTM_A.onnx` p50 593 µs / p99 843 µs; `ulysses_stub identity`
 headroom of roughly p50 497 µs and p99 610 µs to match LSTM_A on this
 hardware before adapter+readout overhead alone exceeds the baseline.
 
+### §5.5 Empirical Kirk latency on production hardware (informative)
+
+Source: Artman, *KIRK/ULYSSES Cross-Platform & Affinity Benchmark Study*,
+Kavara internal, 2026-04-20.
+
+Numbers are from the production GNR+TDX 32-thread close-OpenMP target
+(`OMP_PROC_BIND=close`, `OMP_PLACES=cores`), measured *after* the
+`.contiguous()` adapter requirement called out in Stage 2 above is
+honoured (without it, oneDNN incurs the 7–12 ms/call reorder cost at
+N=1000):
+
+| N | `active_inference` | `inf_features` |
+| ---: | ---: | ---: |
+| 5 | 0.86 ms | 0.30 ms |
+| 20 | 1.45 ms | 0.40 ms |
+| 100 | 17.6 ms | 2.3 ms |
+| 200 | 57 ms | 6.7 ms |
+| 500 | 192 ms | 13 ms |
+| 1000 | 627 ms | 16.4 ms |
+| 2000 | 3.26 s | 217 ms |
+
+These are end-to-end pipeline-variant latencies (Stages 1 + 2 + 3 in the
+production Kirk runtime), not isolated Stage-2 numbers — but the AMX
+matmul cost dominates, so they upper-bound Kirk's contribution to the swap
+latency at each N.
+
 ## §6 Cross-cutting open questions
 
 Stage-specific open questions are inline in §5; this section lists
@@ -231,11 +279,18 @@ cross-cutting items only.
    not formally documented in RS-40 and needs to be pinned before any
    replacement design can be validated against it.
 
-   **Update 2026-04-30:** Empirically informed by published vendor results.
-   Best published `LSTM_A` p99 (Sumaco, latency-optimized): Myrtle.ai BF16
-   FPGA 24.0 µs; Groq FP16 56.4 µs; NVIDIA A100 (Tacana FP32) 35.2 µs.
-   Kavara's internal aspirational target sits below these. Formal RS-40
-   budget per lens still pending Kavara internal decision.
+   **Update 2026-04-30:** Empirical Kirk `active_inference` latency on the
+   production GNR+TDX 32t close target (per §5.5) is 17.6 ms at N=100 — the
+   lowest end of the stated production range — versus the 10 µs lens-2
+   budget recorded in Kavara internal RS-40 design notes. The two figures
+   are 1,760× apart. Even at N=5 (well below production range), Kirk's
+   0.86 ms is 86× over 10 µs. Three reconciliations are possible: (a)
+   RS-40's "Ulysses replaces LSTM_A" is a quality-vs-latency tradeoff
+   demonstration, not a direct latency match; (b) RS-40's actual N for the
+   swap is below 5; (c) the 10 µs figure applies under different operating
+   assumptions than the ones the affinity study measures. Resolution is a
+   Kavara-internal design call; the swap-spec captures the tension without
+   picking.
 
 ## §7 Out of scope
 
