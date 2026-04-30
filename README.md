@@ -97,7 +97,7 @@ A local latency baseline (`bench_results.json`, produced by `scripts/benchmark_i
 
 ## Latency baseline (e2-standard-4 CPU)
 
-All numbers from `bench_results.json`. Hardware: GCP `e2-standard-4` (4 vCPU, no GPU, no AMX). Treat as a relative baseline among the models in this repo, not an absolute target — the RS-40 production-hardware budget (lens 2: p99 10 µs) is roughly two orders of magnitude tighter than what this CPU achieves on the trained LSTM models.
+All numbers from bench_results.json. Hardware: GCP e2-standard-4 (4 vCPU, no GPU, no AMX). Treat as a relative baseline among the models in this repo, not an absolute target — the RS-40 production-hardware budget (lens 2: p99 10 µs) is roughly two orders of magnitude tighter than what this CPU achieves on the trained LSTM models.
 
 | Model | Runtime | p50 (µs) | p99 (µs) |
 | --- | --- | ---: | ---: |
