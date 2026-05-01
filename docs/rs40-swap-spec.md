@@ -374,14 +374,35 @@ inputs (this driver's default) the sign-agreement number lands near
 agreement numbers require real STAC features (out of scope for this
 commit).
 
+A subsequent refinement closed the NMI-parallelism gap. The
+`--nmi N` flag now runs N model instances in parallel via
+`multiprocessing.spawn` (chosen over `fork` because onnxruntime
+sessions are not fork-safe and not picklable in general). Each child
+constructs its own predictor with a deterministic per-instance seed
+(`base_seed * 100 + instance_id`), runs the chosen protocol
+independently, and returns its latency array and output stats to the
+parent; the parent aggregates per-instance and combined percentiles
+and reports a wall-clock-derived
+`throughput_inf_per_sec = (N * n_timed) / (t_end - t_start)`. With
+`--nmi 1` the JSON shape is unchanged and the spawn machinery is
+skipped entirely. Calibration smokes against `LSTM_A.onnx` on the
+4-vCPU `e2-standard-4` rig at 50 warmup + 200 timed showed sub-linear
+throughput scaling: ~562 inf/s at NMI=2 and ~672 inf/s at NMI=4, with
+per-instance p50 staying in the same ~800–900 µs band but p99
+expanding from ~2.6 ms (NMI=1) to ~7 ms (NMI=4) under contention. At
+this run length child-startup overhead (onnxruntime session load)
+dominates the wall clock; STAC's published vendor reports run NMI
+sweeps over much longer durations where startup is amortised — Groq
+to NMI=4, NVIDIA to NMI=32, and Myrtle.ai to NMI=48 — and where the
+hardware's saturation point determines the throughput shape.
+
 Remaining gaps versus STAC's reference, called out explicitly: we
 still do not implement separate Tsupply / Tresult timestamps (we
 capture a single perf_counter_ns pair around the predict call rather
 than splitting the boundary between data supply and result return);
-we do not run NMI parallelism (multiple model instances inferring
-concurrently); we do not implement out-of-order result handling for
-parallel mode; and we do not invoke realtime scheduling. Closing any
-of those is a separate step beyond this refinement.
+we do not implement out-of-order result handling for parallel mode;
+and we do not invoke realtime scheduling. Closing any of those is a
+separate step beyond this refinement.
 
 ## §6 Cross-cutting open questions
 

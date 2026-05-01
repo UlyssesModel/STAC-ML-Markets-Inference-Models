@@ -36,6 +36,33 @@ partial recomputation across calls). Our `LSTM_*.onnx` artifacts ship
 with `stateful=False` (per docs/rs40-swap-spec.md §2), so the LSTMs in
 particular pay the same per-call cost under both protocols.
 
+NMI parallelism
+---------------
+The `--nmi N` flag runs N model instances in parallel through Python's
+`multiprocessing` module on the `spawn` start method. Each child
+process constructs its own predictor instance (so we never need to
+pickle an ONNX session — onnxruntime sessions are not fork-safe and
+not picklable in general), draws its own seed (`base_seed * 100 +
+instance_id`), runs the chosen protocol independently, and returns its
+latency array plus output stats to the parent. The parent then reports
+both per-instance metrics (each child's p50 / p99 / n_timed) and an
+aggregated block (concatenated latencies across all children, with
+combined percentiles), plus a wall-clock-derived
+`throughput_inf_per_sec = (N * n_timed) / (t_end - t_start)` where the
+clock brackets only the parallel section.
+
+`--nmi 1` skips the spawn machinery entirely and runs in-process; the
+JSON output shape is unchanged from the single-instance default in
+that case. NMI > 1 adds top-level `nmi`, `per_instance`, `aggregate`,
+`wall_clock_s`, and `throughput_inf_per_sec` fields; `output_stats` is
+computed across the concatenation of every child's outputs.
+
+Per-instance latency typically degrades once N exceeds the rig's
+physical core count — children contend for CPU, memory bandwidth, and
+shared caches — and aggregate throughput therefore scales sub-linearly
+with NMI. STAC's published vendor reports go up to 32 NMI (NVIDIA) and
+48 NMI (Myrtle.ai); our 4-vCPU dev rig saturates well below that.
+
 Timing methodology
 ------------------
 The timed window is restricted to exactly the predictor's `predict()` call
@@ -72,8 +99,8 @@ outside the window:
 This brings our driver methodologically closer to audit-grade harnesses
 while remaining a *protocol-shaped approximation* of STAC's reference, per
 docs/rs40-swap-spec.md §5.6. We still do not implement separate
-Tsupply/Tresult timestamps, NMI parallelism, out-of-order result handling,
-or hard-realtime scheduling. Numbers produced here remain relative; they
+Tsupply/Tresult timestamps, out-of-order result handling, or
+hard-realtime scheduling. Numbers produced here remain relative; they
 are not directly comparable to a STAC-audited result.
 
 Cross-predictor agreement
@@ -116,6 +143,7 @@ from __future__ import annotations
 import abc
 import argparse
 import json
+import multiprocessing as mp
 import os
 import socket
 import statistics
@@ -412,6 +440,110 @@ def run_sumaco(
     )
 
 
+def _build_predictor_from_args(args_dict: dict) -> STACPredictor:
+    """Construct a primary predictor inside a (possibly child) process.
+
+    The args dict carries the same fields the CLI assembles in `main()`
+    (`predictor`, `model_path`, `ulysses_kirk_mode`, `ulysses_k`,
+    `ulysses_m`, `seed`). Importing ulysses_predictor lazily keeps
+    `--predictor onnx` runs (CI's path) free of the import cost.
+    """
+    p_type = args_dict["predictor"]
+    if p_type == "onnx":
+        return ONNXPredictor(args_dict["model_path"])
+    if p_type == "ulysses_stub":
+        from ulysses_predictor import (
+            IdentityKirk,
+            LinearStubKirk,
+            UlyssesPredictor,
+        )
+
+        mode = args_dict["ulysses_kirk_mode"]
+        if mode == "identity":
+            kirk = IdentityKirk()
+        elif mode == "linear_stub":
+            kirk = LinearStubKirk(k=args_dict["ulysses_k"], seed=args_dict["seed"])
+        else:
+            raise ValueError(f"unknown kirk mode: {mode!r}")
+        return UlyssesPredictor(
+            m=args_dict["ulysses_m"],
+            kirk=kirk,
+            readout_seed=args_dict["seed"],
+        )
+    raise ValueError(f"unknown predictor: {p_type!r}")
+
+
+def run_one_instance(args_dict: dict) -> dict:
+    """Run one model instance end-to-end and return a serialisable result.
+
+    Top-level so it is picklable for `multiprocessing.spawn`. Constructs
+    its own predictor inside the process (predictor objects, particularly
+    onnxruntime sessions, are not assumed to be picklable). Returns the
+    full latency array, the per-call output buffer flattened, and the
+    instance's `output_stats` block — all numpy arrays are converted to
+    lists for IPC compactness on the parent side.
+
+    Expected `args_dict` keys: `predictor`, `model_path`,
+    `ulysses_kirk_mode`, `ulysses_k`, `ulysses_m`, `n_warmup`, `n_timed`,
+    `batch`, `seed`, `protocol`, `tacana_stride`, plus `instance_id` for
+    bookkeeping.
+    """
+    predictor = _build_predictor_from_args(args_dict)
+    T, F = predictor.input_shape
+    rng = np.random.default_rng(args_dict["seed"])
+
+    for _ in range(args_dict["n_warmup"]):
+        x = rng.standard_normal((args_dict["batch"], T, F), dtype=np.float32)
+        predictor.predict(x)
+
+    n_timed = args_dict["n_timed"]
+    batch = args_dict["batch"]
+    _input_storage, window_at = _generate_inputs(
+        args_dict["protocol"],
+        rng,
+        n_timed,
+        batch,
+        T,
+        F,
+        args_dict["tacana_stride"],
+    )
+    latencies_ns = np.empty(n_timed, dtype=np.int64)
+    outputs = np.empty((n_timed, batch, 1), dtype=np.float32)
+
+    for i in range(n_timed):
+        x = window_at(i)
+        t0 = time.perf_counter_ns()
+        y = predictor.predict(x)
+        t1 = time.perf_counter_ns()
+        latencies_ns[i] = t1 - t0
+        outputs[i] = y
+
+    flat = outputs.reshape(-1)
+    all_finite = bool(np.isfinite(flat).all())
+    if not all_finite:
+        n_bad = int((~np.isfinite(flat)).sum())
+        raise AssertionError(
+            f"instance {args_dict.get('instance_id', '?')}: prediction buffer "
+            f"contains {n_bad} non-finite value(s) out of {flat.size}"
+        )
+
+    return {
+        "instance_id": args_dict.get("instance_id", 0),
+        "seed": args_dict["seed"],
+        "n_timed": n_timed,
+        "latencies_ns": latencies_ns.tolist(),
+        "output_stats": {
+            "n_predictions": int(flat.size),
+            "min": float(flat.min()),
+            "max": float(flat.max()),
+            "mean": float(flat.mean()),
+            "std": float(flat.std()),
+            "all_finite": all_finite,
+        },
+        "outputs_flat": flat.tolist(),
+    }
+
+
 def _apply_cpu_pin(cpu: int) -> bool:
     """Pin this process to CPU `cpu`. Returns True on success, False otherwise.
 
@@ -438,6 +570,114 @@ def _apply_cpu_pin(cpu: int) -> bool:
 
 
 PREDICTOR_CHOICES = ("onnx", "ulysses_stub")
+
+
+def _args_dict_for_child(args: argparse.Namespace, instance_id: int) -> dict:
+    """Build the picklable dict `run_one_instance` consumes inside a child."""
+    return {
+        "instance_id": instance_id,
+        "predictor": args.predictor,
+        "model_path": str(args.model_path) if args.model_path else None,
+        "ulysses_kirk_mode": args.ulysses_kirk_mode,
+        "ulysses_k": args.ulysses_k,
+        "ulysses_m": args.ulysses_m,
+        "n_warmup": args.n_warmup,
+        "n_timed": args.n_runs,
+        "batch": args.batch,
+        # Per-instance seed offset: keep 100-step gaps between instances so
+        # accidental collisions with --seed defaults are extremely unlikely.
+        "seed": args.seed * 100 + instance_id,
+        "protocol": args.protocol,
+        "tacana_stride": args.tacana_stride,
+    }
+
+
+def _run_nmi(args: argparse.Namespace, pin_cpu_applied: bool) -> int:
+    """Spawn N model instances in parallel, aggregate, and emit the result JSON."""
+    if args.predictor == "onnx" and not args.model_path:
+        # Mirror the single-instance check; argparse can't enforce this
+        # cross-flag dependency.
+        print(
+            "error: --model-path is required when --predictor onnx",
+            file=sys.stderr,
+        )
+        return 2
+
+    mp.set_start_method("spawn", force=True)
+    children_args = [_args_dict_for_child(args, i) for i in range(args.nmi)]
+
+    t_start = time.perf_counter()
+    with mp.Pool(args.nmi) as pool:
+        child_results = pool.map(run_one_instance, children_args)
+    t_end = time.perf_counter()
+
+    wall_clock_s = t_end - t_start
+    all_latencies_us = np.concatenate(
+        [np.asarray(r["latencies_ns"], dtype=np.int64) for r in child_results]
+    ).astype(np.float64) / 1000.0
+    all_outputs = np.concatenate(
+        [np.asarray(r["outputs_flat"], dtype=np.float32) for r in child_results]
+    )
+
+    per_instance = []
+    for r in child_results:
+        per_us = sorted(np.asarray(r["latencies_ns"], dtype=np.int64).astype(np.float64) / 1000.0)
+        per_instance.append({
+            "instance_id": r["instance_id"],
+            "seed": r["seed"],
+            "n_timed": r["n_timed"],
+            "p50_us": _percentile(per_us, 0.50),
+            "p99_us": _percentile(per_us, 0.99),
+        })
+
+    agg_us = sorted(all_latencies_us.tolist())
+    aggregate = {
+        "p50_us": _percentile(agg_us, 0.50),
+        "p90_us": _percentile(agg_us, 0.90),
+        "p99_us": _percentile(agg_us, 0.99),
+        "mean_us": statistics.fmean(agg_us),
+        "std_us": statistics.pstdev(agg_us),
+    }
+
+    total_predictions = int(all_outputs.size)
+    all_finite = bool(np.isfinite(all_outputs).all())
+
+    result = {
+        "host": {
+            "hostname": socket.gethostname(),
+            "cpu_count": os.cpu_count(),
+        },
+        "protocol": args.protocol,
+        "n_warmup": args.n_warmup,
+        "n_timed": args.n_runs,
+        "batch_size": args.batch,
+        "nmi": args.nmi,
+        "wall_clock_s": wall_clock_s,
+        "throughput_inf_per_sec": (args.nmi * args.n_runs) / wall_clock_s,
+        "per_instance": per_instance,
+        "aggregate": aggregate,
+        "output_stats": {
+            "n_predictions": total_predictions,
+            "min": float(all_outputs.min()),
+            "max": float(all_outputs.max()),
+            "mean": float(all_outputs.mean()),
+            "std": float(all_outputs.std()),
+            "all_finite": all_finite,
+        },
+        "model_path": str(args.model_path) if args.model_path else None,
+        "predictor": args.predictor,
+        "pin_cpu": args.pin_cpu if pin_cpu_applied else None,
+    }
+    if args.protocol == "tacana":
+        result["tacana_stride"] = args.tacana_stride
+    if args.predictor == "ulysses_stub":
+        result["kirk_mode"] = args.ulysses_kirk_mode
+
+    pretty = json.dumps(result, indent=2)
+    print(pretty)
+    if args.output_json:
+        Path(args.output_json).write_text(pretty + "\n")
+    return 0
 
 
 def main() -> int:
@@ -514,13 +754,37 @@ def main() -> int:
             "when --protocol sumaco. Default: 1."
         ),
     )
+    parser.add_argument(
+        "--nmi",
+        type=int,
+        default=1,
+        help=(
+            "Number of Model Instances to run in parallel. nmi=1 (default) "
+            "runs in-process and the JSON output shape is unchanged. "
+            "nmi>1 spawns N child processes (multiprocessing.spawn), each "
+            "running the chosen protocol with its own seed; the parent "
+            "reports per-instance and aggregate latency plus throughput. "
+            "Per-instance latency typically degrades once N exceeds the "
+            "physical core count; aggregate throughput scales sub-linearly."
+        ),
+    )
     args = parser.parse_args()
     if args.tacana_stride < 1:
         parser.error(f"--tacana-stride must be >= 1, got {args.tacana_stride}")
+    if args.nmi < 1:
+        parser.error(f"--nmi must be >= 1, got {args.nmi}")
+    if args.nmi > 1 and args.compare_with is not None:
+        parser.error(
+            "--compare-with is not supported with --nmi > 1; cross-predictor "
+            "agreement is a single-instance metric."
+        )
 
     pin_cpu_applied = False
     if args.pin_cpu is not None:
         pin_cpu_applied = _apply_cpu_pin(args.pin_cpu)
+
+    if args.nmi > 1:
+        return _run_nmi(args, pin_cpu_applied)
 
     if args.predictor == "onnx":
         if not args.model_path:

@@ -21,7 +21,12 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from stac_sumaco_driver import ONNXPredictor, run_protocol, run_sumaco  # noqa: E402
+from stac_sumaco_driver import (  # noqa: E402
+    ONNXPredictor,
+    run_one_instance,
+    run_protocol,
+    run_sumaco,
+)
 from ulysses_predictor import (  # noqa: E402
     IdentityKirk,
     KirkCore,
@@ -260,6 +265,93 @@ def test_tacana_stride() -> None:
     assert result["output_stats"]["all_finite"] is True
 
 
+def test_run_one_instance_function_signature() -> None:
+    """run_one_instance must be top-level (picklable) and accept the args-dict shape."""
+    import stac_sumaco_driver as drv
+
+    # Module-scope check: pickle uses qualname, which must equal the bare name.
+    assert run_one_instance.__module__ == drv.__name__, (
+        f"run_one_instance must live in {drv.__name__!r}, "
+        f"got {run_one_instance.__module__!r}"
+    )
+    assert run_one_instance.__qualname__ == "run_one_instance", (
+        "run_one_instance must be a module-scope function (not nested) "
+        "so multiprocessing.spawn can pickle it"
+    )
+
+    args_dict = {
+        "instance_id": 0,
+        "predictor": "ulysses_stub",
+        "model_path": None,
+        "ulysses_kirk_mode": "identity",
+        "ulysses_k": 128,
+        "ulysses_m": None,
+        "n_warmup": 2,
+        "n_timed": 5,
+        "batch": 1,
+        "seed": 0,
+        "protocol": "sumaco",
+        "tacana_stride": 1,
+    }
+    r = run_one_instance(args_dict)
+    for key in ("latencies_ns", "output_stats", "instance_id", "seed", "n_timed"):
+        assert key in r, f"run_one_instance result missing {key!r}: keys={list(r)}"
+    assert r["n_timed"] == 5
+    assert len(r["latencies_ns"]) == 5
+    assert r["output_stats"]["all_finite"] is True
+    assert r["output_stats"]["n_predictions"] == 5
+
+
+def test_nmi_smoke() -> None:
+    """End-to-end CLI smoke at --nmi 2; verifies aggregate JSON shape."""
+    import json
+    import subprocess
+
+    try:
+        import multiprocessing
+        multiprocessing.get_context("spawn")
+    except (ImportError, ValueError):
+        print("test_nmi_smoke: spawn context unavailable, skipping")
+        return
+
+    driver = REPO_ROOT / "scripts" / "stac_sumaco_driver.py"
+    out_path = "/tmp/test_nmi_smoke.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(driver),
+            "--predictor", "ulysses_stub",
+            "--ulysses-kirk-mode", "identity",
+            "--nmi", "2",
+            "--n-warmup", "5",
+            "--n-runs", "20",
+            "--output-json", out_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"--nmi 2 driver exited {proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    with open(out_path) as f:
+        result = json.load(f)
+    assert result["nmi"] == 2, f"got nmi={result.get('nmi')}"
+    assert isinstance(result["per_instance"], list)
+    assert len(result["per_instance"]) == 2, (
+        f"expected 2 per-instance entries, got {len(result['per_instance'])}"
+    )
+    assert "aggregate" in result, f"missing aggregate block: {list(result)}"
+    for k in ("p50_us", "p90_us", "p99_us", "mean_us", "std_us"):
+        assert k in result["aggregate"], f"aggregate missing {k}"
+    assert "throughput_inf_per_sec" in result
+    assert "wall_clock_s" in result
+    assert result["output_stats"]["n_predictions"] == 2 * 20
+    # Different seeds across instances: instance_id 0 -> seed 0, 1 -> seed 1
+    seeds = [pi["seed"] for pi in result["per_instance"]]
+    assert len(set(seeds)) == 2, f"per-instance seeds must differ, got {seeds}"
+
+
 def main() -> int:
     test_predict_shape()
     test_determinism()
@@ -273,6 +365,8 @@ def main() -> int:
     test_run_protocol_sumaco()
     test_run_protocol_tacana()
     test_tacana_stride()
+    test_run_one_instance_function_signature()
+    test_nmi_smoke()
     print("All UlyssesPredictor tests pass ✓")
     return 0
 
